@@ -1,0 +1,23 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.eggs/
+.venv/
+venv/
+
+# Tooling
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+
+# skills.py runtime output
+skills-security-result.json
+
+# OS / editor
+.DS_Store
+*.swp
+.idea/
+.vscode/

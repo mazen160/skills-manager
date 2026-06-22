@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64" role="img" aria-label="skills.py">
+  <rect width="64" height="64" rx="14" fill="#0D1117"/>
+  <g fill="none" stroke="#3FB950" stroke-width="3.2" stroke-linejoin="round" stroke-linecap="round">
+    <path d="M32 11 L51 18 V32 C51 43 42.5 50.5 32 54 C21.5 50.5 13 43 13 32 V18 Z"/>
+    <path d="M23.5 31.5 L29.5 37.5 L41 25.5"/>
+  </g>
+</svg>
