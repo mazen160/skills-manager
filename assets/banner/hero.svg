@@ -7,7 +7,7 @@
   <rect width="1280" height="600" fill="#0D1117"/>
   <rect width="1280" height="600" fill="url(#dots)"/>
 
-  <g transform="translate(480 96) scale(5.0)">
+  <g transform="translate(499 34) scale(4.4)">
     <path d="M32 6.5 L53 13.5 V32 C53 44.2 44 52.2 32 57.5 C20 52.2 11 44.2 11 32 V13.5 Z"
           fill="#3FB950" stroke="#3FB950" stroke-width="2" stroke-linejoin="round"/>
     <g fill="none" stroke="#0D1117" stroke-width="4.4" stroke-linecap="round" stroke-linejoin="round">
@@ -16,8 +16,8 @@
     </g>
   </g>
 
-  <text x="640" y="470" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, monospace" font-size="112" font-weight="700" letter-spacing="-3">
+  <text x="640" y="446" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, monospace" font-size="112" font-weight="700" letter-spacing="-3">
     <tspan fill="#E6EDF3">skills</tspan><tspan fill="#3FB950">.py</tspan>
   </text>
-  <text x="640" y="528" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, monospace" font-size="30" fill="#8B949E">install AI agent skills without trusting them blindly</text>
+  <text x="640" y="508" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, monospace" font-size="30" fill="#8B949E">install AI agent skills without trusting them blindly</text>
 </svg>
