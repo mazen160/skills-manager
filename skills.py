@@ -54,24 +54,44 @@ BANNER = r"""     _    _ _ _
                       |_|    |___/
  [+] >_ source-readable skills | claude  cursor  codex  opencode"""
 
-# Brand scan-green (#3FB950) via 24-bit truecolor ANSI; reset clears it.
-_SCAN_GREEN = "\033[38;2;63;185;80m"
+# Brand palette as 24-bit truecolor ANSI; reset clears it.
 _ANSI_RESET = "\033[0m"
+_COLORS = {
+    "green": "\033[38;2;63;185;80m",
+    "red": "\033[38;2;248;81;73m",
+    "orange": "\033[38;2;255;123;114m",
+    "yellow": "\033[38;2;210;153;34m",
+    "dim": "\033[38;2;139;148;158m",
+}
+_SCAN_GREEN = _COLORS["green"]
+_SEVERITY_COLORS = {"critical": "red", "high": "orange", "medium": "yellow", "low": "dim"}
 
 
 def _use_color(stream: Any = None) -> bool:
-    """Color only on a real TTY and when NO_COLOR is not set (stdlib only)."""
+    """Color only on a real TTY, honoring NO_COLOR and FORCE_COLOR (stdlib only)."""
     if "NO_COLOR" in os.environ:
         return False
+    if os.environ.get("FORCE_COLOR"):
+        return True
     stream = stream if stream is not None else sys.stdout
     return bool(getattr(stream, "isatty", lambda: False)())
 
 
+def paint(text: str, color: str, stream: Any = None) -> str:
+    """Wrap text in a brand ANSI color when the stream supports color."""
+    code = _COLORS.get(color)
+    if not code or not _use_color(stream):
+        return text
+    return f"{code}{text}{_ANSI_RESET}"
+
+
+def severity_color(severity: str) -> str:
+    return _SEVERITY_COLORS.get(severity, "dim")
+
+
 def render_banner(stream: Any = None) -> str:
     """Return the banner, tinted scan-green when the stream supports color."""
-    if _use_color(stream):
-        return f"{_SCAN_GREEN}{BANNER}{_ANSI_RESET}"
-    return BANNER
+    return paint(BANNER, "green", stream)
 
 
 INSTALL_METADATA_FILENAME = ".skills-install.json"
@@ -607,14 +627,14 @@ def prepared_source(
         security_root.mkdir()
 
         if source.kind == "github":
-            print(f"Cloning {source.repo_url}")
+            print(paint(f"Cloning {source.repo_url}", "dim"))
             clone_source(source, clone_root)
             remove_root_git_metadata(clone_root)
             source_root = clone_root
         else:
             if source.local_path is None:
                 raise SkillInstallError("Local source path was not resolved")
-            print(f"Using local folder {source.local_path}")
+            print(paint(f"Using local folder {source.local_path}", "dim"))
             shutil.copytree(source.local_path, clone_root, symlinks=True)
             remove_root_git_metadata(clone_root)
             source_root = clone_root
@@ -1560,10 +1580,10 @@ def print_files_to_scan(inventory: dict[str, Any]) -> None:
     )
     print(f"Files to Scan: {inventory.get('file_count', len(paths))}")
     for path in paths[:MAX_RELEVANT_FILE_DISPLAY]:
-        print(f"- {path}")
+        print(paint(f"- {path}", "dim"))
     hidden = len(paths) - MAX_RELEVANT_FILE_DISPLAY
     if hidden > 0:
-        print(f"... {hidden} more file(s) hidden")
+        print(paint(f"... {hidden} more file(s) hidden", "dim"))
 
 
 def print_relevant_scan_files(inventory: dict[str, Any]) -> None:
@@ -1588,7 +1608,7 @@ def print_relevant_scan_files(inventory: dict[str, Any]) -> None:
 
     print(f"Scanned files: {inventory.get('file_count', len(files))}")
     if not rows:
-        print("Relevant files: none")
+        print(f"Relevant files: {paint('none', 'green')}")
         return
 
     rows.sort(key=lambda row: (row[0].lower() != "skill.md", row[0].lower()))
@@ -1600,8 +1620,8 @@ def print_relevant_scan_files(inventory: dict[str, Any]) -> None:
     size_width = max(len("Size"), *(len(size) for _, size, _ in shown))
 
     print(f"Relevant files: {len(rows)}")
-    print(f"{'File'.ljust(path_width)}  {'Size'.rjust(size_width)}  Why")
-    print(f"{'-' * path_width}  {'-' * size_width}  ---")
+    print(paint(f"{'File'.ljust(path_width)}  {'Size'.rjust(size_width)}  Why", "dim"))
+    print(paint(f"{'-' * path_width}  {'-' * size_width}  ---", "dim"))
     for path, size, reason in shown:
         print(
             f"{truncate_text(path, path_width).ljust(path_width)}  "
@@ -1609,7 +1629,7 @@ def print_relevant_scan_files(inventory: dict[str, Any]) -> None:
         )
     hidden = len(rows) - len(shown)
     if hidden > 0:
-        print(f"... {hidden} more relevant file(s) hidden")
+        print(paint(f"... {hidden} more relevant file(s) hidden", "dim"))
 
 
 def relevant_file_reasons(item: dict[str, Any], finding_paths: set[str]) -> list[str]:
@@ -2647,9 +2667,10 @@ def print_security_inputs(
             deterministic_findings,
             key=lambda finding_item: -risk_rank(finding_item["severity"]),
         ):
-            print(f"- [{item['severity'].upper()}] {item['path']}: {item['issue']}")
+            tag = paint(f"[{item['severity'].upper()}]", severity_color(item["severity"]))
+            print(f"- {tag} {item['path']}: {item['issue']}")
             if item["recommendation"]:
-                print(f"  Recommendation: {item['recommendation']}")
+                print(paint(f"  Recommendation: {item['recommendation']}", "dim"))
     else:
         print("Deterministic findings: none")
 
@@ -2667,25 +2688,33 @@ def print_security_inputs(
 def print_security_result(
     result: dict[str, Any], result_file: Path, result_saved: bool
 ) -> None:
-    status = "safe" if is_security_result_safe(result) else "unsafe"
-    print(f"Security result: {status} ({result.get('risk_level', 'unknown')})")
-    print(f"Security JSON: {format_security_result_location(result_file, result_saved)}")
+    safe = is_security_result_safe(result)
+    status = "safe" if safe else "unsafe"
+    risk = result.get("risk_level", "unknown")
+    print(f"Security result: {paint(f'{status} ({risk})', 'green' if safe else 'red')}")
+    print(
+        paint(
+            f"Security JSON: {format_security_result_location(result_file, result_saved)}",
+            "dim",
+        )
+    )
     summary = result.get("summary")
     if summary:
         print(f"Summary: {summary}")
 
     findings = normalize_findings(result.get("findings", []))
     if not findings:
-        print("Findings: none")
+        print(f"Findings: {paint('none', 'green')}")
         return
 
     print("Findings:")
     for item in sorted(
         findings, key=lambda finding_item: -risk_rank(finding_item["severity"])
     ):
-        print(f"- [{item['severity'].upper()}] {item['path']}: {item['issue']}")
+        tag = paint(f"[{item['severity'].upper()}]", severity_color(item["severity"]))
+        print(f"- {tag} {item['path']}: {item['issue']}")
         if item["recommendation"]:
-            print(f"  Recommendation: {item['recommendation']}")
+            print(paint(f"  Recommendation: {item['recommendation']}", "dim"))
 
 
 def print_install_summary(records: list[InstallRecord]) -> None:
@@ -2693,7 +2722,10 @@ def print_install_summary(records: list[InstallRecord]) -> None:
     skipped = [record for record in records if record.status == "skipped"]
 
     for record in records:
-        action = "Installed" if record.status == "installed" else "Skipped existing"
+        if record.status == "installed":
+            action = paint("Installed", "green")
+        else:
+            action = paint("Skipped existing", "dim")
         print(
             f"{action}: {record.source.name} -> {record.destination} [{record.agent}]"
         )
@@ -2702,7 +2734,7 @@ def print_install_summary(records: list[InstallRecord]) -> None:
 
 
 def print_elapsed(label: str, started_at: float) -> None:
-    print(f"{label} in {format_elapsed(time.monotonic() - started_at)}.")
+    print(paint(f"{label} in {format_elapsed(time.monotonic() - started_at)}.", "dim"))
 
 
 def format_elapsed(seconds: float) -> str:
