@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64" role="img" aria-label="skills.py">
+  <defs>
+    <mask id="prompt">
+      <rect width="64" height="64" fill="#fff"/>
+      <g fill="none" stroke="#000" stroke-width="4.4" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M25.5 27 L32.5 33 L25.5 39"/>
+        <line x1="35.5" y1="39.5" x2="44" y2="39.5"/>
+      </g>
+    </mask>
+  </defs>
+  <rect width="64" height="64" rx="14" fill="#0D1117"/>
+  <path d="M32 9 L51 15.5 V32 C51 42.8 43 50 32 54.5 C21 50 13 42.8 13 32 V15.5 Z"
+        fill="#3FB950" stroke="#3FB950" stroke-width="4" stroke-linejoin="round" mask="url(#prompt)"/>
+</svg>

@@ -1,12 +1,13 @@
 <p align="center">
-  <img src="assets/hero.png" alt="skills.py — install AI agent skills safely" width="760">
+  <img src="assets/banner/hero.png" alt="skills.py: install AI agent skills safely" width="760">
 </p>
 
 <p align="center">
-  <em>Scan, install, and update AI agent skills — without trusting them blindly.</em>
+  <em>Install AI agent skills without trusting them blindly.</em>
 </p>
 
 <p align="center">
+  <a href="https://pypi.org/project/skills-package-manager/"><img src="https://img.shields.io/pypi/v/skills-package-manager?color=3FB950&label=pypi" alt="PyPI"></a>
   <img src="https://img.shields.io/badge/python-3.9%2B-3FB950" alt="Python 3.9+">
   <img src="https://img.shields.io/badge/dependencies-none-3FB950" alt="Zero dependencies">
   <img src="https://img.shields.io/badge/single%20file-skills.py-3FB950" alt="Single file">
@@ -15,38 +16,59 @@
 
 ---
 
-`skills.py` is a single-file CLI that manages [agent skills](https://docs.anthropic.com/en/docs/claude-code/skills) for **Claude, Cursor, Codex, and OpenCode** — and runs a security gate over every skill *before* it ever lands in your agent's config.
+`skills.py` installs and manages [agent skills](https://docs.anthropic.com/en/docs/claude-code/skills) for **Claude, Cursor, Codex, and OpenCode**. Before any skill touches your config, it scans the source.
 
-Agent skills are just folders of Markdown and scripts that your coding agent reads and executes. Installing one from a stranger's repo is running their instructions inside your agent. `skills.py` treats that like the supply-chain problem it is: it scans the source first, blocks the obvious traps, and can hand the rest to an AI reviewer before anything is copied to disk.
+I built it because installing a skill is riskier than it looks. A skill is a folder of Markdown and scripts that your coding agent reads and runs. Install one from someone else's repo and you're running their instructions inside your agent, with your files and your shell. That's a supply-chain problem, so `skills.py` treats it like one: scan the source first, block the obvious traps, and optionally hand the rest to an AI reviewer before a single file hits disk.
 
-No dependencies. One file. Python standard library only.
+One file. No dependencies. Python standard library only.
+
+## See it catch a bad skill
+
+Here's `skills.py` refusing a skill that ships a private key, a `curl | sh` bootstrap, and an `rm -rf`. The install is blocked and nothing is copied to disk:
+
+<p align="center">
+  <img src="assets/demo/scan.png" alt="skills.py scan blocking a malicious skill with a private key, curl-pipe-sh, and rm -rf" width="720">
+</p>
 
 ## Why
 
-A skill can hide a lot in plain sight: a private key, a `curl | sh`, a git hook that re-installs itself, a binary blob a text scanner skims past, or a line of prompt injection buried in `SKILL.md`. Once it's in `~/.claude/skills/`, your agent will happily read and act on it.
+A skill can hide a lot in plain sight: a private key, a `curl | sh` one-liner, a git hook that reinstalls itself after you delete it, a binary blob a text scanner skips, or instructions buried behind padding or opaque files. Once that folder is in `~/.claude/skills/`, your agent reads it and acts on it like any other instruction.
 
 `skills.py` puts a checkpoint in front of the copy step:
 
-- **Static checks always run** and block on high/critical findings — no flag required.
-- **AI checks are opt-in** (`--ai-checks`): a sandboxed agent independently reviews the source and returns a JSON verdict.
-- **Skills must be source-readable text.** Binaries, archives, native libraries, bytecode, symlinks, and hard links are rejected, not silently trusted.
+- Static checks run on every command and block high and critical findings. No flag to remember.
+- AI checks are opt-in (`--ai-checks`). A sandboxed agent reviews the source on its own and writes a JSON verdict.
+- Skills have to be source-readable text. If a package ships binaries, archives, native libraries, bytecode, symlinks, or hard links, `skills.py` rejects it.
 
 ## Install
 
-Recommended — install the `skills` command with [pipx](https://pipx.pypa.io/):
+Install from PyPI with pip. You get a `skills` command on your `PATH`:
 
 ```bash
-pipx install git+https://github.com/mazen160/skills.py
+pip install skills-package-manager
+skills --help
 ```
 
-Or grab the single file and run it directly — there's nothing to build and nothing to pull in:
+Prefer an isolated install? Use [pipx](https://pipx.pypa.io/):
+
+```bash
+pipx install skills-package-manager
+```
+
+Or skip the install. It's one file with no dependencies, so you can run it straight from source:
 
 ```bash
 curl -O https://raw.githubusercontent.com/mazen160/skills.py/main/skills.py
 python3 skills.py --help
 ```
 
-> Examples below use the `skills` command. If you're running the file directly, swap in `python3 skills.py`.
+> The package is published as `skills-package-manager`. Installing it gives you two equivalent commands, `skills` and `skills.py`. If you're running from source instead, use `python3 skills.py`.
+
+Run `skills` with no arguments for the full command surface:
+
+<p align="center">
+  <img src="assets/demo/banner.png" alt="skills.py command-line help and command list" width="660">
+</p>
 
 ## Quickstart
 
@@ -72,6 +94,9 @@ skills install https://github.com/owner/repo --recursive
 # See what's installed across all agents
 skills list
 
+# Show descriptions and install paths
+skills list --verbose
+
 # Check tracked skills for upstream changes, then apply them
 skills update
 skills update --apply
@@ -81,32 +106,37 @@ skills uninstall my-skill
 skills uninstall my-skill -y
 ```
 
+`skills scan` prints the full file list before scanning, then a compact relevant-files table after static checks, including `SKILL.md`, executable scripts, dependency manifests, hidden files, symlinks, archives, compiled payloads, and files with deterministic findings.
+
 ## What it checks
 
-The static pass walks the whole source tree and flags, among other things:
+The static pass walks the whole source tree and focuses on deterministic supply-chain techniques rather than trying to guess intent from prose:
 
 | Category | Examples |
 | --- | --- |
 | Secrets & keys | `BEGIN PRIVATE KEY`, `id_rsa`, `.pem`/`.key`, `api_key = "…"` |
-| Dangerous commands | `curl … \| sh`, `rm -rf /`, `chmod +x`, `eval`/`exec`, `subprocess` |
-| Non-text payloads | binaries, images, archives, `.pyc`, `.so`/`.dll`, Office docs |
-| Filesystem tricks | symlinks, absolute/escaping links, hard links, hidden files |
+| Execution surfaces | `curl … \| sh`, `rm -rf /`, `chmod +x`, `eval`/`exec`, `subprocess`, `os.system` |
+| Non-text payloads | binaries, images, archives, Office docs, `.pyc`, `.so`/`.dll`, `.jar`, `.node` |
+| Archive indirection | path traversal inside archives, embedded bytecode/native files, embedded scripts, hidden config files |
+| Filesystem tricks | symlinks, absolute/escaping links, hard links, hard links that point outside the scanned tree, embedded `.git` metadata, hidden files |
 | Persistence | `.git/hooks`, `core.hooksPath`, `.husky`, package lifecycle scripts |
 | Registry hijacks | `.npmrc`/`.yarnrc` rewrites, `PIP_INDEX_URL`, extra index URLs |
-| Prompt injection | "ignore previous instructions", exfiltration phrasing, scanner-evasion padding |
+| Native loading | `LD_PRELOAD`, `DYLD_INSERT_LIBRARIES`, `ctypes.CDLL`, `dlopen`, runtime `.so` compilation |
+| Scanner evasion | long whitespace padding, more than 2,000 lines, more than 140,000 chars, files too large to fully scan |
+| Credential harvesting surface | executable code that reads environment variables |
 
-High and critical findings block the install. Every run writes a normalized JSON report (`skills-security-result.json` by default) so you can read or store the verdict.
+High and critical findings block the install. The verdict is printed by default; pass `--security-result-file PATH` when you want to save the normalized JSON report.
 
-The optional AI pass (`--ai-checks`) hands the inventory and source to the agent CLI you choose (`--agent claude|cursor|codex|opencode`) running in a restricted, read-only-ish sandbox, and merges its findings with the deterministic ones.
+The static pass does not try to detect prompt injection by matching phrases like "ignore previous instructions" or "exfiltrate tokens." Those checks are too easy to bypass and too noisy to trust. The AI pass (`--ai-checks`) hands the inventory and source to the agent CLI you pick (`--agent claude|cursor|codex|opencode`). It runs in a restricted sandbox, reviews the source on its own, and merges its findings with the static ones. Normal output hides the large prompt and inventory; use `--show-ai-inputs` when you need to debug the exact AI-review inputs.
 
 ## Sources
 
 `skills.py` installs from:
 
-- a GitHub repo URL — `https://github.com/owner/repo`
-- a GitHub tree URL — `https://github.com/owner/repo/tree/<branch>/<path>`
-- an SSH remote — `git@github.com:owner/repo.git`
-- a local folder — `./path/to/skill`
+- a GitHub repo URL: `https://github.com/owner/repo`
+- a GitHub tree URL: `https://github.com/owner/repo/tree/<branch>/<path>`
+- an SSH remote: `git@github.com:owner/repo.git`
+- a local folder: `./path/to/skill`
 
 Use `--path` to pick a subfolder and `--branch` to target a branch or tag. GitHub sources are fetched with a sparse, blobless clone when a path is given.
 
@@ -123,9 +153,9 @@ Installed skills carry a small `.skills-install.json` record of where they came 
 
 ## How it works
 
-1. **Resolve & fetch** the source into a temporary directory (sparse clone for GitHub, direct read for local folders).
-2. **Gate** it: static checks always; AI review when `--ai-checks` is set. Anything high/critical stops here.
-3. **Install** by atomically copying each `SKILL.md` directory into the target agent's skills folder, with tracking metadata for future updates.
+1. Resolve and fetch the source into a temporary directory (a sparse clone for GitHub, a direct read for local folders).
+2. Gate it. Static checks run every time; the AI review runs when `--ai-checks` is set. Anything high or critical stops here.
+3. Copy each `SKILL.md` directory into the target agent's skills folder atomically, with tracking metadata for later updates.
 
 ## Requirements
 

@@ -1,0 +1,23 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="600" viewBox="0 0 1280 600" role="img" aria-label="skills.py: install AI agent skills safely">
+  <defs>
+    <pattern id="dots" width="34" height="34" patternUnits="userSpaceOnUse">
+      <circle cx="2" cy="2" r="2" fill="#3FB950" fill-opacity="0.05"/>
+    </pattern>
+  </defs>
+  <rect width="1280" height="600" fill="#0D1117"/>
+  <rect width="1280" height="600" fill="url(#dots)"/>
+
+  <g transform="translate(480 96) scale(5.0)">
+    <path d="M32 6.5 L53 13.5 V32 C53 44.2 44 52.2 32 57.5 C20 52.2 11 44.2 11 32 V13.5 Z"
+          fill="#3FB950" stroke="#3FB950" stroke-width="2" stroke-linejoin="round"/>
+    <g fill="none" stroke="#0D1117" stroke-width="4.4" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M25.5 27 L32.5 33 L25.5 39"/>
+      <line x1="35.5" y1="39.5" x2="44" y2="39.5"/>
+    </g>
+  </g>
+
+  <text x="640" y="470" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, monospace" font-size="112" font-weight="700" letter-spacing="-3">
+    <tspan fill="#E6EDF3">skills</tspan><tspan fill="#3FB950">.py</tspan>
+  </text>
+  <text x="640" y="528" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, monospace" font-size="30" fill="#8B949E">install AI agent skills without trusting them blindly</text>
+</svg>

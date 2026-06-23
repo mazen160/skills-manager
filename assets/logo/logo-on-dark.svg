@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="340" height="80" viewBox="0 0 340 80" role="img" aria-label="skills.py logo">
+  <defs>
+    <mask id="prompt">
+      <rect width="340" height="80" fill="#fff"/>
+      <g fill="none" stroke="#000" stroke-width="4.4" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M25.5 27 L32.5 33 L25.5 39"/>
+        <line x1="35.5" y1="39.5" x2="44" y2="39.5"/>
+      </g>
+    </mask>
+  </defs>
+  <path d="M32 6.5 L53 13.5 V32 C53 44.2 44 52.2 32 57.5 C20 52.2 11 44.2 11 32 V13.5 Z"
+        transform="translate(6 8)"
+        fill="#3FB950" stroke="#3FB950" stroke-width="4.5" stroke-linejoin="round" mask="url(#prompt)"/>
+  <text x="84" y="54" font-family="ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, monospace" font-size="44" font-weight="700" letter-spacing="-1">
+    <tspan fill="#E6EDF3">skills</tspan><tspan fill="#3FB950">.py</tspan>
+  </text>
+</svg>

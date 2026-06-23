@@ -1,0 +1,26 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="630" viewBox="0 0 1200 630" role="img" aria-label="skills.py">
+  <defs>
+    <pattern id="dots" width="34" height="34" patternUnits="userSpaceOnUse">
+      <circle cx="2" cy="2" r="2" fill="#3FB950" fill-opacity="0.05"/>
+    </pattern>
+  </defs>
+  <rect width="1200" height="630" fill="#0D1117"/>
+  <rect width="1200" height="630" fill="url(#dots)"/>
+
+  <g transform="translate(140 160) scale(5.0)">
+    <path d="M32 6.5 L53 13.5 V32 C53 44.2 44 52.2 32 57.5 C20 52.2 11 44.2 11 32 V13.5 Z"
+          fill="#3FB950" stroke="#3FB950" stroke-width="2" stroke-linejoin="round"/>
+    <g fill="none" stroke="#0D1117" stroke-width="4.4" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M25.5 27 L32.5 33 L25.5 39"/>
+      <line x1="35.5" y1="39.5" x2="44" y2="39.5"/>
+    </g>
+  </g>
+
+  <text x="470" y="346" font-family="ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, monospace" font-size="120" font-weight="700" letter-spacing="-3">
+    <tspan fill="#E6EDF3">skills</tspan><tspan fill="#3FB950">.py</tspan>
+  </text>
+  <text x="474" y="408" font-family="ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, monospace" font-size="28" fill="#8B949E">scan &#183; install &#183; update agent skills</text>
+  <text x="474" y="452" font-family="ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, monospace" font-size="28" fill="#586069">claude &#183; cursor &#183; codex &#183; opencode</text>
+
+  <text x="1140" y="588" text-anchor="end" font-family="ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, monospace" font-size="26" fill="#586069">github.com/mazen160/skills.py</text>
+</svg>

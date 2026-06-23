@@ -3,9 +3,9 @@ requires = ["setuptools>=61"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "skills-py"
+name = "skills-package-manager"
 version = "0.1.0"
-description = "Scan, install, and update AI agent skills safely across Claude, Cursor, Codex, and OpenCode."
+description = "skills.py: scan, install, and update AI agent skills safely across Claude, Cursor, Codex, and OpenCode."
 readme = "README.md"
 requires-python = ">=3.9"
 license = { text = "MIT" }
@@ -25,7 +25,13 @@ classifiers = [
     "Environment :: Console",
     "Intended Audience :: Developers",
     "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
     "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
     "Topic :: Security",
     "Topic :: Software Development :: Libraries",
 ]
@@ -35,9 +41,16 @@ dependencies = []
 Homepage = "https://github.com/mazen160/skills.py"
 Repository = "https://github.com/mazen160/skills.py"
 Issues = "https://github.com/mazen160/skills.py/issues"
+"PyPI" = "https://pypi.org/project/skills-package-manager/"
 
 [project.scripts]
 skills = "skills:main"
+skills-package-manager = "skills:main"
 
 [tool.setuptools]
 py-modules = ["skills"]
+license-files = ["LICENSE"]
+# Installs the actual skills.py file onto PATH so `skills.py` also works as a
+# command. It can't be a console-script entry point: a generated launcher named
+# skills.py would shadow `import skills` and break every command.
+script-files = ["skills.py"]

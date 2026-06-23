@@ -1,0 +1,24 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="914" height="580" viewBox="0 0 914 580" role="img" aria-label="skills">
+<rect width="914" height="580" rx="12" fill="#0D1117" stroke="#30363D" stroke-width="1"/>
+<path d="M0 46 V12 a12 12 0 0 1 12 -12 H902 a12 12 0 0 1 12 12 V46 Z" fill="#161B22"/>
+<circle cx="26" cy="23" r="7" fill="#FF5F56"/>
+<circle cx="48" cy="23" r="7" fill="#FFBD2E"/>
+<circle cx="70" cy="23" r="7" fill="#27C93F"/>
+<text x="457.0" y="29" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, 'DejaVu Sans Mono', monospace" font-size="15" fill="#8B949E">skills</text>
+<text x="30" y="76" xml:space="preserve" font-family="ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, 'DejaVu Sans Mono', monospace" font-size="22" font-weight="500"><tspan fill="#8B949E">$ </tspan><tspan fill="#F0F6FC">skills</tspan></text>
+<text x="30" y="106" xml:space="preserve" font-family="ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, 'DejaVu Sans Mono', monospace" font-size="22" font-weight="500"><tspan fill="#3FB950">     _    _ _ _</tspan></text>
+<text x="30" y="136" xml:space="preserve" font-family="ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, 'DejaVu Sans Mono', monospace" font-size="22" font-weight="500"><tspan fill="#3FB950"> ___| | _(_) | |___   _ __  _   _</tspan></text>
+<text x="30" y="166" xml:space="preserve" font-family="ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, 'DejaVu Sans Mono', monospace" font-size="22" font-weight="500"><tspan fill="#3FB950">/ __| |/ / | | / __| | &#x27;_ \| | | |</tspan></text>
+<text x="30" y="196" xml:space="preserve" font-family="ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, 'DejaVu Sans Mono', monospace" font-size="22" font-weight="500"><tspan fill="#3FB950">\__ \   &lt;| | | \__ \_| |_) | |_| |</tspan></text>
+<text x="30" y="226" xml:space="preserve" font-family="ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, 'DejaVu Sans Mono', monospace" font-size="22" font-weight="500"><tspan fill="#3FB950">|___/_|\_\_|_|_|___(_) .__/ \__, |</tspan></text>
+<text x="30" y="256" xml:space="preserve" font-family="ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, 'DejaVu Sans Mono', monospace" font-size="22" font-weight="500"><tspan fill="#3FB950">                      |_|    |___/</tspan></text>
+<text x="30" y="286" xml:space="preserve" font-family="ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, 'DejaVu Sans Mono', monospace" font-size="22" font-weight="500"><tspan fill="#3FB950"> [+] &gt;_ source-readable skills | claude  cursor  codex  opencode</tspan></text>
+<text x="30" y="316" xml:space="preserve" font-family="ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, 'DejaVu Sans Mono', monospace" font-size="22" font-weight="500"><tspan fill="#C9D1D9"></tspan></text>
+<text x="30" y="346" xml:space="preserve" font-family="ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, 'DejaVu Sans Mono', monospace" font-size="22" font-weight="500"><tspan fill="#8B949E">Manage Claude, Cursor, Codex, or OpenCode skills.</tspan></text>
+<text x="30" y="376" xml:space="preserve" font-family="ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, 'DejaVu Sans Mono', monospace" font-size="22" font-weight="500"><tspan fill="#C9D1D9"></tspan></text>
+<text x="30" y="406" xml:space="preserve" font-family="ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, 'DejaVu Sans Mono', monospace" font-size="22" font-weight="500"><tspan fill="#C9D1D9">  scan       Scan a GitHub or local skill source</tspan></text>
+<text x="30" y="436" xml:space="preserve" font-family="ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, 'DejaVu Sans Mono', monospace" font-size="22" font-weight="500"><tspan fill="#C9D1D9">  install    Install skills after security checks pass</tspan></text>
+<text x="30" y="466" xml:space="preserve" font-family="ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, 'DejaVu Sans Mono', monospace" font-size="22" font-weight="500"><tspan fill="#C9D1D9">  list       List installed skills</tspan></text>
+<text x="30" y="496" xml:space="preserve" font-family="ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, 'DejaVu Sans Mono', monospace" font-size="22" font-weight="500"><tspan fill="#C9D1D9">  update     Check or apply updates for installed skills</tspan></text>
+<text x="30" y="526" xml:space="preserve" font-family="ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, 'DejaVu Sans Mono', monospace" font-size="22" font-weight="500"><tspan fill="#C9D1D9">  uninstall  Remove an installed skill</tspan></text>
+</svg>
