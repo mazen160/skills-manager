@@ -11,8 +11,8 @@
     <path d="M32 6.5 L53 13.5 V32 C53 44.2 44 52.2 32 57.5 C20 52.2 11 44.2 11 32 V13.5 Z"
           fill="#3FB950" stroke="#3FB950" stroke-width="2" stroke-linejoin="round"/>
     <g fill="none" stroke="#0D1117" stroke-width="4.4" stroke-linecap="round" stroke-linejoin="round">
-      <path d="M25.5 27 L32.5 33 L25.5 39"/>
-      <line x1="35.5" y1="39.5" x2="44" y2="39.5"/>
+      <path d="M23.5 25.5 L30.5 31.5 L23.5 37.5"/>
+      <line x1="33.5" y1="37.5" x2="40.5" y2="37.5"/>
     </g>
   </g>
 
