@@ -1,18 +1,28 @@
-<p align="center">
-  <img src="assets/banner/hero.png" alt="Skills Manager: install AI agent skills safely" width="760">
-</p>
+<div align="center">
 
-<p align="center">
-  <em>Install AI agent skills without trusting them blindly.</em>
-</p>
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="assets/logo/logo-on-dark.png">
+  <img src="assets/logo/logo-on-light.png" alt="Skills Manager" width="360">
+</picture>
 
-<p align="center">
+<br><br>
+
+<img src="assets/banner/hero.png" alt="Skills Manager: install AI agent skills without trusting them blindly" width="100%">
+
+<br>
+
+**Scan, install, update, and analyze AI agent skills without trusting them blindly.**
+
   <a href="https://pypi.org/project/skills-manager/"><img src="https://img.shields.io/pypi/v/skills-manager?color=3FB950&label=pypi" alt="PyPI"></a>
+  <a href="https://github.com/mazen160/skills-manager/stargazers"><img src="https://img.shields.io/github/stars/mazen160/skills-manager?style=flat&logo=github" alt="GitHub Stars"></a>
   <img src="https://img.shields.io/badge/python-3.9%2B-3FB950" alt="Python 3.9+">
   <img src="https://img.shields.io/badge/dependencies-none-3FB950" alt="Zero dependencies">
   <img src="https://img.shields.io/badge/single%20file-skills__manager.py-3FB950" alt="Single file">
-  <img src="https://img.shields.io/badge/license-MIT-3FB950" alt="MIT License">
-</p>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-3FB950" alt="MIT License"></a>
+
+[**Quickstart**](#quickstart) · [**Features**](#features) · [**Security checks**](#what-it-checks) · [**CLI reference**](#cli-reference)
+
+</div>
 
 ---
 
@@ -62,11 +72,15 @@ AI review adds another layer; it never weakens the built-in security gate. A hig
 
 Here's Skills Manager refusing a skill that ships a private key, a `curl | sh` bootstrap, and an `rm -rf`. The install is blocked and nothing is copied to disk:
 
-<p align="center">
-  <img src="assets/demo/scan.png" alt="Skills Manager scan blocking a malicious skill with a private key, curl-pipe-sh, and rm -rf" width="720">
-</p>
+<div align="center">
 
-## Why
+<img src="assets/demo/scan.png" alt="Skills Manager scan blocking a malicious skill with a private key, curl-pipe-sh, and rm -rf" width="100%">
+
+*The static scanner explains every finding, returns a non-zero exit code, and leaves the agent's skills directory untouched.*
+
+</div>
+
+## Why Skills Manager
 
 A skill can hide a lot in plain sight: a private key, a `curl | sh` one-liner, a git hook that reinstalls itself after you delete it, a binary blob a text scanner skips, or instructions buried behind padding or opaque files. Once that folder is in `~/.claude/skills/`, your agent reads it and acts on it like any other instruction.
 
@@ -75,6 +89,8 @@ Skills Manager puts a checkpoint in front of the copy step:
 - Static checks run on every command and block high and critical findings. No flag to remember.
 - AI checks are opt-in (`--ai-checks`). A sandboxed agent reviews the source on its own and writes a JSON verdict.
 - Skills have to be source-readable text. If a package ships binaries, archives, native libraries, bytecode, symlinks, or hard links, Skills Manager rejects it.
+
+> **Inspect first. Install second. Keep every skill traceable.**
 
 ## Install
 
@@ -102,9 +118,13 @@ python3 skills_manager.py --help
 
 Run `skills` with no arguments for the full command surface:
 
-<p align="center">
-  <img src="assets/demo/banner.png" alt="Skills Manager command-line help and command list" width="660">
-</p>
+<div align="center">
+
+<img src="assets/demo/banner.png" alt="Skills Manager command-line help and command list" width="100%">
+
+*One CLI manages the same workflow across Claude, Cursor, Codex, and OpenCode.*
+
+</div>
 
 ## Quickstart
 
@@ -158,6 +178,20 @@ skills analyze cost ~/.claude/skills
 skills analyze cost ~/.claude/skills ~/.codex/skills --load-mode metadata
 skills analyze cost ./path/to/skill --json
 ```
+
+## CLI reference
+
+| Command | Description |
+| --- | --- |
+| `skills scan SOURCE` | Inspect a GitHub or local source with deterministic checks and optional AI review. |
+| `skills install SOURCE` | Scan and atomically install one skill or recursively discovered skills. |
+| `skills list` | List installed skills for one agent or across every supported agent. |
+| `skills update [SKILL]` | Re-fetch tracked sources, show changes, rescan them, and optionally apply approved updates. |
+| `skills uninstall SKILL` | Preview or confirm removal from one agent or all supported agents. |
+| `skills analyze cost ROOT...` | Estimate context usage and validate local or installed skill definitions. |
+| `skills --banner` | Print the Skills Manager banner and exit. |
+
+Every installed command name is equivalent: `skill`, `skills`, `skill-manager`, and `skills-manager`.
 
 `skills scan` prints the full file list before scanning, then a compact relevant-files table after static checks, including `SKILL.md`, executable scripts, dependency manifests, hidden files, symlinks, archives, compiled payloads, and files with deterministic findings.
 
@@ -276,11 +310,14 @@ Use `--path` to pick a subfolder and `--branch` to target a branch or tag. GitHu
 
 Installed skills carry a small `.skills-install.json` record of where they came from, which is what makes `skills update` able to re-fetch and diff them later.
 
-## How it works
+## Under the hood
 
-1. Resolve and fetch the source into a temporary directory (a sparse clone for GitHub, a direct read for local folders).
-2. Gate it. Static checks run every time; the AI review runs when `--ai-checks` is set. Anything high or critical stops here.
-3. Copy each `SKILL.md` directory into the target agent's skills folder atomically, with tracking metadata for later updates.
+Skills Manager is a single standard-library Python module. It resolves untrusted sources into a temporary workspace, inventories the filesystem before reading content, and keeps the security decision separate from the copy step.
+
+1. **Resolve.** Fetch the source into a temporary directory using a sparse clone for GitHub paths or a direct read for local folders.
+2. **Inventory.** Walk the complete tree and classify regular files, links, archives, binaries, executable surfaces, and skill roots.
+3. **Gate.** Run deterministic checks every time, then add the sandboxed AI review when `--ai-checks` is set. High or critical findings stop the workflow.
+4. **Install.** Copy approved `SKILL.md` directories atomically and record their source metadata for future update checks.
 
 ## Requirements
 
@@ -297,6 +334,26 @@ python3 -m unittest discover -s tests
 ```
 
 It covers the deterministic static checks (including a bytecode-poisoning regression), source/URL parsing, argument validation, and the cost analyzer.
+
+## Found this useful?
+
+If Skills Manager keeps an unsafe skill out of your agent, please [**star the repository**](https://github.com/mazen160/skills-manager). It helps other developers discover the project.
+
+Share it:
+
+[![Share on X](https://img.shields.io/badge/Share-on%20X-000?logo=x&logoColor=white&style=flat)](https://twitter.com/intent/tweet?text=Skills%20Manager%20scans%20AI%20agent%20skills%20before%20they%20touch%20your%20config.%20Static%20checks%2C%20optional%20AI%20review%2C%20safe%20installs%2C%20updates%2C%20and%20context-cost%20analysis.&url=https%3A%2F%2Fgithub.com%2Fmazen160%2Fskills-manager&hashtags=AIAgents,Security,DevTools)
+[![Submit to Hacker News](https://img.shields.io/badge/Submit-Hacker%20News-FF6600?logo=ycombinator&logoColor=white&style=flat)](https://news.ycombinator.com/submitlink?u=https%3A%2F%2Fgithub.com%2Fmazen160%2Fskills-manager&t=Show%20HN%3A%20Skills%20Manager%20%E2%80%93%20scan%20AI%20agent%20skills%20before%20installing%20them)
+[![Share on Reddit](https://img.shields.io/badge/Share-Reddit-FF4500?logo=reddit&logoColor=white&style=flat)](https://www.reddit.com/submit?url=https%3A%2F%2Fgithub.com%2Fmazen160%2Fskills-manager&title=Skills%20Manager%20%E2%80%93%20scan%20AI%20agent%20skills%20before%20installing%20them)
+[![Share on LinkedIn](https://img.shields.io/badge/Share-LinkedIn-0A66C2?logo=linkedin&logoColor=white&style=flat)](https://www.linkedin.com/sharing/share-offsite/?url=https%3A%2F%2Fgithub.com%2Fmazen160%2Fskills-manager)
+
+## Author
+
+**Mazin Ahmed**
+
+- Website: [mazinahmed.net](https://mazinahmed.net)
+- Twitter: [@mazen160](https://twitter.com/mazen160)
+- LinkedIn: [linkedin.com/in/infosecmazinahmed](https://linkedin.com/in/infosecmazinahmed)
+- GitHub: [github.com/mazen160](https://github.com/mazen160)
 
 ## License
 
