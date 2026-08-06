@@ -1,0 +1,87 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    name: Test (Python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.9", "3.10", "3.11", "3.12", "3.13"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Run unit tests
+        run: python -m unittest discover -s tests -v
+
+  package:
+    name: Build and install package
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Build wheel
+        run: |
+          pip install build
+          python -m build --wheel
+
+      - name: Install from wheel
+        run: pip install dist/*.whl
+
+      - name: Verify all entry-point aliases
+        run: |
+          skill --version
+          skills --version
+          skill-manager --version
+          skills-manager --version
+
+      - name: Verify banner output
+        run: skill --banner
+
+      - name: Verify version matches pyproject.toml
+        run: |
+          PYPROJECT_VER=$(python -c "
+          import re, pathlib
+          m = re.search(r'^version = \"([^\"]+)\"', pathlib.Path('pyproject.toml').read_text(), re.MULTILINE)
+          print(m.group(1))
+          ")
+          CLI_VER=$(skills --version | awk '{print $NF}')
+          echo "pyproject.toml: $PYPROJECT_VER"
+          echo "CLI: $CLI_VER"
+          [ "$PYPROJECT_VER" = "$CLI_VER" ]
+
+  lint:
+    name: Package metadata check
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Check package metadata
+        run: |
+          pip install build twine
+          python -m build --wheel --sdist
+          twine check dist/*
