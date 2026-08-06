@@ -42,8 +42,8 @@ Skills consume context too. skills analyze cost estimates catalog, activation, a
 
 ## 6/6 - try it
 
-Skills Manager v1.0.0 is one Python file with no runtime dependencies. Install it with: pip install skills-manager
+Skills Manager v1.0.0 is one Python file with no runtime dependencies. Install it with: pip install agentic-skills-manager
 
 https://github.com/mazen160/skills-manager
 
-[character count: 157]
+[character count: 165]

@@ -1,6 +1,6 @@
 # Releasing Skills Manager
 
-Skills Manager ships to PyPI as [`skills-manager`](https://pypi.org/project/skills-manager/). The import module is `skills_manager`. Version `1.0.0` is the first public release.
+Skills Manager ships to PyPI as [`agentic-skills-manager`](https://pypi.org/project/agentic-skills-manager/). The product remains Skills Manager and the import module remains `skills_manager`. Version `1.0.0` is the first public release.
 
 ## One-time setup
 
@@ -39,8 +39,8 @@ This command:
 The verified artifacts are written to `dist/`:
 
 ```text
-dist/skills_manager-1.0.0-py3-none-any.whl
-dist/skills_manager-1.0.0.tar.gz
+dist/agentic_skills_manager-1.0.0-py3-none-any.whl
+dist/agentic_skills_manager-1.0.0.tar.gz
 ```
 
 ## TestPyPI
@@ -53,7 +53,7 @@ python3 -m venv /tmp/skills-manager-testpypi
 /tmp/skills-manager-testpypi/bin/pip install \
   --index-url https://test.pypi.org/simple/ \
   --extra-index-url https://pypi.org/simple/ \
-  skills-manager==1.0.0
+  agentic-skills-manager==1.0.0
 /tmp/skills-manager-testpypi/bin/skills --version
 ```
 
@@ -82,8 +82,8 @@ Create the GitHub release from the reviewed notes:
 gh release create v1.0.0 \
   --title "Skills Manager v1.0.0" \
   --notes-file RELEASE_NOTES.md \
-  dist/skills_manager-1.0.0-py3-none-any.whl \
-  dist/skills_manager-1.0.0.tar.gz
+  dist/agentic_skills_manager-1.0.0-py3-none-any.whl \
+  dist/agentic_skills_manager-1.0.0.tar.gz
 ```
 
 ## Verify production
@@ -92,7 +92,7 @@ Install from PyPI into another clean environment:
 
 ```bash
 python3 -m venv /tmp/skills-manager-pypi
-/tmp/skills-manager-pypi/bin/pip install skills-manager==1.0.0
+/tmp/skills-manager-pypi/bin/pip install agentic-skills-manager==1.0.0
 /tmp/skills-manager-pypi/bin/skill --version
 /tmp/skills-manager-pypi/bin/skills --version
 /tmp/skills-manager-pypi/bin/skill-manager --version

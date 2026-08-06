@@ -13,7 +13,7 @@
 
 **Scan, install, update, and analyze AI agent skills without trusting them blindly.**
 
-  <a href="https://pypi.org/project/skills-manager/"><img src="https://img.shields.io/pypi/v/skills-manager?color=3FB950&label=pypi" alt="PyPI"></a>
+  <a href="https://pypi.org/project/agentic-skills-manager/"><img src="https://img.shields.io/pypi/v/agentic-skills-manager?color=3FB950&label=pypi" alt="PyPI"></a>
   <a href="https://github.com/mazen160/skills-manager/stargazers"><img src="https://img.shields.io/github/stars/mazen160/skills-manager?style=flat&logo=github" alt="GitHub Stars"></a>
   <img src="https://img.shields.io/badge/python-3.9%2B-3FB950" alt="Python 3.9+">
   <img src="https://img.shields.io/badge/dependencies-none-3FB950" alt="Zero dependencies">
@@ -97,14 +97,14 @@ Skills Manager puts a checkpoint in front of the copy step:
 Install from PyPI with pip. You get a `skills` command on your `PATH`:
 
 ```bash
-pip install skills-manager
+pip install agentic-skills-manager
 skills --help
 ```
 
 Prefer an isolated install? Use [pipx](https://pipx.pypa.io/):
 
 ```bash
-pipx install skills-manager
+pipx install agentic-skills-manager
 ```
 
 Or skip the install. It's one file with no dependencies, so you can run it straight from source:
@@ -114,7 +114,7 @@ curl -O https://raw.githubusercontent.com/mazen160/skills-manager/main/skills_ma
 python3 skills_manager.py --help
 ```
 
-> The distribution is `skills-manager`. Installing it gives you four equivalent commands: `skill`, `skills`, `skill-manager`, and `skills-manager`. If you're running from source, use `python3 skills_manager.py`.
+> The PyPI distribution is `agentic-skills-manager`. The product is still Skills Manager, and installing it gives you four equivalent commands: `skill`, `skills`, `skill-manager`, and `skills-manager`. If you're running from source, use `python3 skills_manager.py`.
 
 Run `skills` with no arguments for the full command surface:
 

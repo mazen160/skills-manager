@@ -3,7 +3,7 @@ requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "skills-manager"
+name = "agentic-skills-manager"
 version = "1.0.0"
 description = "Skills Manager: scan, install, update, and analyze AI agent skills safely across Claude, Cursor, Codex, and OpenCode."
 readme = "README.md"
@@ -42,7 +42,7 @@ Homepage = "https://github.com/mazen160/skills-manager"
 Repository = "https://github.com/mazen160/skills-manager"
 Issues = "https://github.com/mazen160/skills-manager/issues"
 Changelog = "https://github.com/mazen160/skills-manager/blob/main/CHANGELOG.md"
-"PyPI" = "https://pypi.org/project/skills-manager/"
+"PyPI" = "https://pypi.org/project/agentic-skills-manager/"
 
 [project.scripts]
 skill = "skills_manager:main"

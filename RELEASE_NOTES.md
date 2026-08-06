@@ -48,7 +48,7 @@ skills scan https://github.com/owner/repo --ci --output result.json
 ## Install
 
 ```sh
-python3 -m pip install skills-manager==1.0.0
+python3 -m pip install agentic-skills-manager==1.0.0
 skills --version
 ```
 

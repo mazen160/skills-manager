@@ -5,7 +5,7 @@ DIST_DIR := dist
 SMOKE_VENV := .release-venv
 VERSION := $(shell sed -n 's/^version = "\([^"]*\)"/\1/p' pyproject.toml)
 MODULE_VERSION := $(shell $(PYTHON) -c 'import skills_manager; print(skills_manager.__version__)')
-WHEEL := $(DIST_DIR)/skills_manager-$(VERSION)-py3-none-any.whl
+WHEEL := $(DIST_DIR)/agentic_skills_manager-$(VERSION)-py3-none-any.whl
 
 .DEFAULT_GOAL := help
 
@@ -43,7 +43,7 @@ build: clean test
 	$(PYTHON) -m build
 
 check: build
-	@test -f '$(DIST_DIR)/skills_manager-$(VERSION).tar.gz'
+	@test -f '$(DIST_DIR)/agentic_skills_manager-$(VERSION).tar.gz'
 	@test -f '$(WHEEL)'
 	$(PYTHON) -m twine check --strict $(DIST_DIR)/*
 
