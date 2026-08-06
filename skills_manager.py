@@ -36,20 +36,12 @@ AGENT_ALIASES = {
     "claude": "claude",
     "claude_code": "claude",
     "claude-code": "claude",
-    "cloud": "claude",
-    "cloud_code": "claude",
-    "cloud-code": "claude",
     "cursor": "cursor",
     "codex": "codex",
-    "codecs": "codex",
     "open_code": "opencode",
     "open-code": "opencode",
     "opencode": "opencode",
 }
-SUPPORTED_AGENT_HELP = (
-    "Supported agents: claude, cursor, codex, opencode. "
-    "Aliases: cloud/cloud-code -> claude, codecs -> codex, open_code/open-code -> opencode."
-)
 
 # Minimalist, source-readable ASCII wordmark for the CLI. Pure ASCII only
 # (no Unicode / binary) so the banner is as inspectable as the skills it vets.
@@ -107,6 +99,10 @@ MAX_TEXT_REVIEW_CHARS = AVERAGE_REVIEW_CHARS_PER_LINE * MAX_TEXT_REVIEW_LINES
 MAX_INVENTORY_FILES = 5000
 MAX_RELEVANT_FILE_DISPLAY = 80
 MAX_ZIP_MEMBERS = 1000
+MAX_ARCHIVE_MEMBER_BYTES = 100 * 1024 * 1024  # 100 MB uncompressed per member
+MAX_COMPRESSION_RATIO = 100  # flag probable zip-bomb entries
+MAX_SCAN_BYTES_TOTAL = 512 * 1024 * 1024  # 512 MB total bytes hashed/read per scan
+MAX_DIRECTORY_DEPTH = 50  # flag pathologically deep trees
 FILE_READ_CHUNK_BYTES = 1024 * 1024
 BLOCKED_BYTECODE_SUFFIXES = {".pyc", ".pyo"}
 BLOCKED_NATIVE_SUFFIXES = {".so", ".dylib", ".dll", ".pyd", ".node", ".class", ".jar"}
@@ -284,7 +280,6 @@ def main() -> int:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=f"{render_banner()}\n\nManage Claude, Cursor, Codex, or OpenCode skills.",
-        epilog=SUPPORTED_AGENT_HELP,
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument(
@@ -305,7 +300,6 @@ def build_parser() -> argparse.ArgumentParser:
         "scan",
         help="Scan a GitHub or local skill source",
         description="Run static skill security checks, optionally followed by AI checks.",
-        epilog=SUPPORTED_AGENT_HELP,
     )
     add_source_arguments(scan_parser)
     add_security_arguments(scan_parser)
@@ -330,7 +324,6 @@ def build_parser() -> argparse.ArgumentParser:
         "list",
         help="List installed skills",
         description="List installed skills for supported local agents.",
-        epilog=SUPPORTED_AGENT_HELP,
     )
     list_parser.add_argument(
         "--agent", metavar="AGENT", help="Filter by supported agent"
@@ -346,7 +339,6 @@ def build_parser() -> argparse.ArgumentParser:
         "install",
         help="Install skills from a GitHub or local source",
         description="Install skills after static checks, optionally followed by AI checks.",
-        epilog=SUPPORTED_AGENT_HELP,
     )
     add_source_arguments(install_parser)
     add_security_arguments(
@@ -379,7 +371,6 @@ def build_parser() -> argparse.ArgumentParser:
         "update",
         help="Check or apply updates for installed skills",
         description="Re-fetch tracked skill sources, compare installed content, and optionally apply updates.",
-        epilog=SUPPORTED_AGENT_HELP,
     )
     update_parser.add_argument(
         "skill", nargs="?", help="Optional installed skill name to update"
@@ -430,7 +421,6 @@ def build_parser() -> argparse.ArgumentParser:
         "uninstall",
         help="Uninstall installed skills",
         description="Remove an installed skill from one agent or all supported agents.",
-        epilog=SUPPORTED_AGENT_HELP,
     )
     uninstall_parser.add_argument("skill", help="Installed skill name to remove")
     uninstall_parser.add_argument(
@@ -930,9 +920,9 @@ def canonical_agent(value: str) -> str:
     normalized = value.strip().lower()
     agent = AGENT_ALIASES.get(normalized)
     if agent is None:
-        supported = ", ".join(sorted(AGENT_ALIASES))
+        supported = ", ".join(SUPPORTED_AGENTS)
         raise SkillInstallError(
-            f"Unsupported agent: {value}. Supported names and aliases: {supported}"
+            f"Unsupported agent: {value}. Choose one of: {supported}"
         )
     return agent
 
@@ -1220,15 +1210,38 @@ def copy_skill_tree(
         )
     )
     temp_destination = temp_parent / destination.name
+    backup_parent: Path | None = None
     try:
         shutil.copytree(source, temp_destination, symlinks=True)
         if metadata is not None:
             write_json(temp_destination / INSTALL_METADATA_FILENAME, metadata)
         if destination.exists() or destination.is_symlink():
-            remove_existing(destination)
-        temp_destination.rename(destination)
+            # Move original to a backup in the same directory (same filesystem,
+            # so rename is atomic) before placing the new tree.  If the swap
+            # fails we restore from the backup so the caller is never left with
+            # neither old nor new content.
+            backup_parent = Path(
+                tempfile.mkdtemp(
+                    prefix=f".{destination.name}.backup-", dir=str(destination.parent)
+                )
+            )
+            backup_dest = backup_parent / destination.name
+            destination.rename(backup_dest)
+        try:
+            temp_destination.rename(destination)
+        except OSError:
+            # Restore the original from backup before propagating.
+            if backup_parent is not None:
+                backup_dest = backup_parent / destination.name
+                if backup_dest.exists() or backup_dest.is_symlink():
+                    backup_dest.rename(destination)
+            raise
     finally:
         shutil.rmtree(temp_parent, ignore_errors=True)
+        if backup_parent is not None:
+            # Always clean up the backup dir (its contents were either restored
+            # above on failure, or the rename succeeded so the dir is now empty).
+            shutil.rmtree(backup_parent, ignore_errors=True)
 
 
 def check_or_apply_update(
@@ -1761,8 +1774,13 @@ def run_ai_security_checks(
 
     result = read_or_extract_security_json(temp_result_file, command_result.stdout)
     normalized = normalize_security_result(result, inventory)
-    output_result_file.parent.mkdir(parents=True, exist_ok=True)
-    write_json(output_result_file, normalized)
+    try:
+        output_result_file.parent.mkdir(parents=True, exist_ok=True)
+        write_json(output_result_file, normalized)
+    except OSError as exc:
+        raise SkillInstallError(
+            f"Cannot write security result to {output_result_file}: {exc}"
+        ) from exc
     return normalized
 
 
@@ -1775,8 +1793,13 @@ def run_static_security_checks(
     if inventory is None:
         inventory = build_security_inventory(scan_root)
     result = build_static_security_result(inventory)
-    output_result_file.parent.mkdir(parents=True, exist_ok=True)
-    write_json(output_result_file, result)
+    try:
+        output_result_file.parent.mkdir(parents=True, exist_ok=True)
+        write_json(output_result_file, result)
+    except OSError as exc:
+        raise SkillInstallError(
+            f"Cannot write security result to {output_result_file}: {exc}"
+        ) from exc
     return inventory, result
 
 
@@ -1936,9 +1959,23 @@ def build_security_inventory(scan_root: Path) -> dict[str, Any]:
     inode_paths: dict[tuple[int, int], list[str]] = {}
     inode_link_counts: dict[tuple[int, int], int] = {}
     root_resolved = scan_root.resolve()
+    total_bytes_read = 0
+    scan_budget_exceeded = False
 
     for current_root, dirnames, filenames in os.walk(scan_root):
         current_path = Path(current_root)
+
+        depth = len(current_path.relative_to(scan_root).parts)
+        if depth >= MAX_DIRECTORY_DEPTH and dirnames:
+            dirnames.clear()
+            findings.append(
+                finding(
+                    "high",
+                    relative_string(current_path, scan_root),
+                    f"Directory tree exceeds depth limit of {MAX_DIRECTORY_DEPTH}.",
+                    "Treat excessively deep directory trees as unsafe; reduce package size.",
+                )
+            )
 
         for dirname in list(dirnames):
             path = current_path / dirname
@@ -2023,6 +2060,19 @@ def build_security_inventory(scan_root: Path) -> dict[str, Any]:
                     inode_key = (stat.st_dev, stat.st_ino)
                     inode_paths.setdefault(inode_key, []).append(rel)
                     inode_link_counts[inode_key] = stat.st_nlink
+                if total_bytes_read + stat.st_size > MAX_SCAN_BYTES_TOTAL:
+                    findings.append(
+                        finding(
+                            "high",
+                            rel,
+                            f"Scan budget exceeded at {MAX_SCAN_BYTES_TOTAL // (1024 * 1024)} MB total.",
+                            "Treat partially-scanned packages as unsafe; reduce package size.",
+                        )
+                    )
+                    files.append(item)
+                    scan_budget_exceeded = True
+                    break
+                total_bytes_read += stat.st_size
                 item["sha256"] = sha256_file(path)
                 findings.extend(
                     scan_file_for_security_indicators(path, scan_root, stat.st_size)
@@ -2039,7 +2089,7 @@ def build_security_inventory(scan_root: Path) -> dict[str, Any]:
                     )
                 )
                 break
-        if len(files) >= MAX_INVENTORY_FILES:
+        if scan_budget_exceeded or len(files) >= MAX_INVENTORY_FILES:
             break
 
     findings.extend(build_hardlink_findings(inode_paths, inode_link_counts))
@@ -2373,6 +2423,24 @@ def scan_zip_like_archive(path: Path, scan_root: Path) -> list[dict[str, str]]:
                     "Reject archives with unsafe extraction paths.",
                 )
             )
+        if member.file_size > MAX_ARCHIVE_MEMBER_BYTES:
+            findings.append(
+                finding(
+                    "high",
+                    member_path,
+                    f"Archive member uncompressed size ({member.file_size // (1024 * 1024)} MB) exceeds limit.",
+                    "Reject archive members that would exhaust disk or memory on extraction.",
+                )
+            )
+        if member.compress_size > 0 and member.file_size / member.compress_size > MAX_COMPRESSION_RATIO:
+            findings.append(
+                finding(
+                    "high",
+                    member_path,
+                    f"Archive member has extreme compression ratio ({member.file_size // max(member.compress_size, 1)}:1).",
+                    "Reject probable zip-bomb entries that expand to exhaust resources.",
+                )
+            )
         if member_suffix in BLOCKED_BYTECODE_SUFFIXES | BLOCKED_NATIVE_SUFFIXES:
             findings.append(
                 finding(
@@ -2583,7 +2651,8 @@ Scan root:
 Inventory JSON:
 {inventory_file}
 
-Write exactly one JSON object to this file:
+Output exactly one JSON object. Write it to this file if you have write access, otherwise
+print it to stdout — the caller captures both:
 {result_file}
 
 Required JSON shape:
@@ -2671,6 +2740,10 @@ def security_agent_command(
         raise SkillInstallError(f"Security agent CLI is not on PATH: {agent}")
 
     if agent == "claude":
+        # Write is intentionally excluded: Claude outputs the JSON result to
+        # stdout (captured by --print) instead of writing to disk.  This
+        # prevents the AI reviewer from modifying scan_root or any other
+        # directory, even if the skill contains a prompt-injection attack.
         command = [
             executable,
             "--safe-mode",
@@ -2678,16 +2751,8 @@ def security_agent_command(
         ]
         for allowed_dir in deduplicate_paths([workspace, scan_root]):
             command.extend(["--add-dir", str(allowed_dir)])
-        command.extend(
-            [
-                "--allowed-tools",
-                "Read,Glob,Grep,LS,Write",
-            ]
-        )
-        return SecurityAgentInvocation(
-            command,
-            prompt,
-        )
+        command.extend(["--allowed-tools", "Read,Glob,Grep,LS"])
+        return SecurityAgentInvocation(command, prompt)
     if agent == "codex":
         return SecurityAgentInvocation(
             [
@@ -2705,6 +2770,16 @@ def security_agent_command(
             prompt,
         )
     if agent == "cursor":
+        # --trust disables Cursor's confirmation dialogs and grants broad
+        # local filesystem write access.  A prompt-injection attack inside the
+        # skill being reviewed could direct Cursor to write outside workspace.
+        # Accept this risk only when cursor is explicitly chosen; prefer claude
+        # or codex for stronger isolation.
+        print(
+            "Warning: cursor --trust grants broad filesystem write access."
+            " A malicious skill could exploit prompt injection to write"
+            " outside the review workspace."
+        )
         return SecurityAgentInvocation(
             [
                 executable,
@@ -2718,6 +2793,14 @@ def security_agent_command(
             None,
         )
     if agent == "opencode":
+        # opencode has no explicit sandbox flags in this invocation;
+        # network access and subprocess execution may be available.
+        # Prefer claude or codex for stronger isolation.
+        print(
+            "Warning: opencode runs without explicit filesystem or network"
+            " sandboxing. A malicious skill could exploit prompt injection"
+            " to access resources outside the review workspace."
+        )
         return SecurityAgentInvocation(
             [executable, "run", "--cwd", str(workspace), prompt], None
         )
@@ -3060,6 +3143,16 @@ def resolve_output_path(value: str) -> Path:
     path = Path(value).expanduser()
     if not path.is_absolute():
         path = Path.cwd() / path
+    if path.is_dir():
+        raise SkillInstallError(
+            f"Output path is a directory, not a file: {path}"
+        )
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        raise SkillInstallError(
+            f"Cannot create output directory {path.parent}: {exc}"
+        ) from exc
     return path
 
 
