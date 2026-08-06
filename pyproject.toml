@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "skills-manager"
-version = "0.1.0"
+version = "1.0.0"
 description = "Skills Manager: scan, install, update, and analyze AI agent skills safely across Claude, Cursor, Codex, and OpenCode."
 readme = "README.md"
 requires-python = ">=3.9"
@@ -22,7 +22,7 @@ keywords = [
     "opencode",
 ]
 classifiers = [
-    "Development Status :: 4 - Beta",
+    "Development Status :: 5 - Production/Stable",
     "Environment :: Console",
     "Intended Audience :: Developers",
     "Operating System :: OS Independent",
@@ -41,6 +41,7 @@ dependencies = []
 Homepage = "https://github.com/mazen160/skills-manager"
 Repository = "https://github.com/mazen160/skills-manager"
 Issues = "https://github.com/mazen160/skills-manager/issues"
+Changelog = "https://github.com/mazen160/skills-manager/blob/main/CHANGELOG.md"
 "PyPI" = "https://pypi.org/project/skills-manager/"
 
 [project.scripts]

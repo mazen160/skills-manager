@@ -6,7 +6,9 @@ build/
 dist/
 .eggs/
 .venv/
+.release-venv/
 venv/
+.pypirc
 
 # Tooling
 .mypy_cache/

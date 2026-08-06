@@ -1,76 +1,102 @@
-# Releasing
+# Releasing Skills Manager
 
-Skills Manager ships to PyPI as [`skills-manager`](https://pypi.org/project/skills-manager/). The import module is `skills_manager`.
+Skills Manager ships to PyPI as [`skills-manager`](https://pypi.org/project/skills-manager/). The import module is `skills_manager`. Version `1.0.0` is the first public release.
 
 ## One-time setup
 
+Install the isolated build and upload tools:
+
 ```bash
-python3 -m pip install --upgrade build twine
+make release-tools
 ```
 
-Create a PyPI API token at https://pypi.org/manage/account/token/ and put it in `~/.pypirc`:
+Create a scoped PyPI API token at <https://pypi.org/manage/account/token/> and store it outside the repository. Twine reads `TWINE_USERNAME` and `TWINE_PASSWORD`, or the matching entry in `~/.pypirc`.
 
 ```ini
 [pypi]
-  username = __token__
-  password = pypi-<your-token>
+username = __token__
+password = pypi-<your-token>
 ```
 
-## Cut a release
+Never commit the token or `.pypirc`.
 
-1. Bump the version in `pyproject.toml` (`[project] version`).
-2. Build the sdist and wheel:
+## Prepare v1.0.0
+
+Run the complete local release gate:
 
 ```bash
-rm -rf dist build *.egg-info
-python3 -m build
+make release
 ```
 
-3. Check the artifacts:
+This command:
+
+1. Confirms `pyproject.toml` and `skills_manager.__version__` agree.
+2. Runs the test suite.
+3. Builds a clean source archive and wheel.
+4. Runs `twine check --strict` over both artifacts.
+5. Installs the wheel in `.release-venv` and exercises `skill`, `skills`, `skill-manager`, and `skills-manager`.
+
+The verified artifacts are written to `dist/`:
+
+```text
+dist/skills_manager-1.0.0-py3-none-any.whl
+dist/skills_manager-1.0.0.tar.gz
+```
+
+## TestPyPI
+
+Test the upload and installation path before the production release:
 
 ```bash
-python3 -m twine check dist/*
+make publish-test
+python3 -m venv /tmp/skills-manager-testpypi
+/tmp/skills-manager-testpypi/bin/pip install \
+  --index-url https://test.pypi.org/simple/ \
+  --extra-index-url https://pypi.org/simple/ \
+  skills-manager==1.0.0
+/tmp/skills-manager-testpypi/bin/skills --version
 ```
 
-4. Smoke-test the wheel in a clean environment:
+## Tag and publish
+
+Commit the release files before creating the tag:
 
 ```bash
-python3 -m venv /tmp/skills-test
-/tmp/skills-test/bin/pip install dist/skills_manager-*.whl
-/tmp/skills-test/bin/skills --help
-/tmp/skills-test/bin/skill --banner
-/tmp/skills-test/bin/skill-manager --banner
-/tmp/skills-test/bin/skills-manager --banner
+git add pyproject.toml skills_manager.py tests/test_skills_manager.py \
+  Makefile MANIFEST.in README.md RELEASING.md CHANGELOG.md \
+  RELEASE_NOTES.md TWEET_THREAD.md .gitignore
+git commit -m "release: v1.0.0"
+git tag -a v1.0.0 -m "v1.0.0"
+git push origin main v1.0.0
 ```
 
-5. (Optional) Upload to TestPyPI first:
+Upload the exact verified version. The confirmation value prevents an accidental production upload:
 
 ```bash
-python3 -m twine upload --repository testpypi dist/*
-pip install --index-url https://test.pypi.org/simple/ skills-manager
+make publish CONFIRM_VERSION=1.0.0
 ```
 
-6. Upload to PyPI:
+Create the GitHub release from the reviewed notes:
 
 ```bash
-python3 -m twine upload dist/*
+gh release create v1.0.0 \
+  --title "Skills Manager v1.0.0" \
+  --notes-file RELEASE_NOTES.md \
+  dist/skills_manager-1.0.0-py3-none-any.whl \
+  dist/skills_manager-1.0.0.tar.gz
 ```
 
-7. Tag the release:
+## Verify production
+
+Install from PyPI into another clean environment:
 
 ```bash
-git tag -a v0.1.0 -m "v0.1.0"
-git push origin v0.1.0
+python3 -m venv /tmp/skills-manager-pypi
+/tmp/skills-manager-pypi/bin/pip install skills-manager==1.0.0
+/tmp/skills-manager-pypi/bin/skill --version
+/tmp/skills-manager-pypi/bin/skills --version
+/tmp/skills-manager-pypi/bin/skill-manager --version
+/tmp/skills-manager-pypi/bin/skills-manager --version
 ```
 
-## After release
-
-```bash
-pip install skills-manager
-skills --help
-skill --help
-skill-manager --help
-skills-manager --help
-```
-
-Installing the package puts four equivalent commands on `PATH`: `skill`, `skills`, `skill-manager`, and `skills-manager`.
+PyPI does not allow replacing files for an existing version. If an artifact is wrong after upload, increment the version and publish a new release.

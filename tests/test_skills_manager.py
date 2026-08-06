@@ -9,6 +9,7 @@ Dependency-free: run with the standard library test runner.
 
 from __future__ import annotations
 
+import re
 import sys
 import unittest
 from pathlib import Path
@@ -16,6 +17,18 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import skills_manager as skills  # noqa: E402
+
+
+class VersionTests(unittest.TestCase):
+    def test_module_and_package_versions_match(self) -> None:
+        pyproject = Path(__file__).resolve().parent.parent / "pyproject.toml"
+        match = re.search(
+            r'^version = "([^"]+)"$',
+            pyproject.read_text(encoding="utf-8"),
+            re.MULTILINE,
+        )
+        self.assertIsNotNone(match)
+        self.assertEqual(match.group(1), skills.__version__)
 
 
 class AgentResolutionTests(unittest.TestCase):

@@ -1,5 +1,8 @@
 include README.md
 include LICENSE
+include CHANGELOG.md
+include RELEASING.md
+include Makefile
 prune assets
 global-exclude *.py[cod]
 global-exclude .DS_Store

@@ -1,13 +1,13 @@
 <div align="center">
 
 <picture>
-  <source media="(prefers-color-scheme: dark)" srcset="assets/logo/logo-on-dark.png">
-  <img src="assets/logo/logo-on-light.png" alt="Skills Manager" width="360">
+  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/mazen160/skills-manager/main/assets/logo/logo-on-dark.png">
+  <img src="https://raw.githubusercontent.com/mazen160/skills-manager/main/assets/logo/logo-on-light.png" alt="Skills Manager" width="360">
 </picture>
 
 <br><br>
 
-<img src="assets/banner/hero.png" alt="Skills Manager: install AI agent skills without trusting them blindly" width="100%">
+<img src="https://raw.githubusercontent.com/mazen160/skills-manager/main/assets/banner/hero.png" alt="Skills Manager: install AI agent skills without trusting them blindly" width="100%">
 
 <br>
 
@@ -18,7 +18,7 @@
   <img src="https://img.shields.io/badge/python-3.9%2B-3FB950" alt="Python 3.9+">
   <img src="https://img.shields.io/badge/dependencies-none-3FB950" alt="Zero dependencies">
   <img src="https://img.shields.io/badge/single%20file-skills__manager.py-3FB950" alt="Single file">
-  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-3FB950" alt="MIT License"></a>
+  <a href="https://github.com/mazen160/skills-manager/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-MIT-3FB950" alt="MIT License"></a>
 
 [**Quickstart**](#quickstart) · [**Features**](#features) · [**Security checks**](#what-it-checks) · [**CLI reference**](#cli-reference)
 
@@ -74,7 +74,7 @@ Here's Skills Manager refusing a skill that ships a private key, a `curl | sh` b
 
 <div align="center">
 
-<img src="assets/demo/scan.png" alt="Skills Manager scan blocking a malicious skill with a private key, curl-pipe-sh, and rm -rf" width="100%">
+<img src="https://raw.githubusercontent.com/mazen160/skills-manager/main/assets/demo/scan.png" alt="Skills Manager scan blocking a malicious skill with a private key, curl-pipe-sh, and rm -rf" width="100%">
 
 *The static scanner explains every finding, returns a non-zero exit code, and leaves the agent's skills directory untouched.*
 
@@ -120,7 +120,7 @@ Run `skills` with no arguments for the full command surface:
 
 <div align="center">
 
-<img src="assets/demo/banner.png" alt="Skills Manager command-line help and command list" width="100%">
+<img src="https://raw.githubusercontent.com/mazen160/skills-manager/main/assets/demo/banner.png" alt="Skills Manager command-line help and command list" width="100%">
 
 *One CLI manages the same workflow across Claude, Cursor, Codex, and OpenCode.*
 
@@ -134,6 +134,9 @@ skills scan https://github.com/owner/repo
 
 # Print the Skills Manager banner
 skills --banner
+
+# Print the installed version
+skills --version
 
 # Scan, then run a second-round AI review with Claude
 skills scan https://github.com/owner/repo --ai-checks
@@ -190,6 +193,7 @@ skills analyze cost ./path/to/skill --json
 | `skills uninstall SKILL` | Preview or confirm removal from one agent or all supported agents. |
 | `skills analyze cost ROOT...` | Estimate context usage and validate local or installed skill definitions. |
 | `skills --banner` | Print the Skills Manager banner and exit. |
+| `skills --version` | Print the installed Skills Manager version. |
 
 Every installed command name is equivalent: `skill`, `skills`, `skill-manager`, and `skills-manager`.
 

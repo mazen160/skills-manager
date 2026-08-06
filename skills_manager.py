@@ -30,6 +30,7 @@ from urllib.parse import unquote, urlparse
 # Constants, branding, and terminal output
 
 
+__version__ = "1.0.0"
 SUPPORTED_AGENTS = ("claude", "cursor", "codex", "opencode")
 AGENT_ALIASES = {
     "claude": "claude",
@@ -291,6 +292,12 @@ def build_parser() -> argparse.ArgumentParser:
         action="version",
         version=render_banner(),
         help="Print the Skills Manager banner and exit",
+    )
+    parser.add_argument(
+        "--version",
+        action="version",
+        version=f"%(prog)s {__version__}",
+        help="Print the Skills Manager version and exit",
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
