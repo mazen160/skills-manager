@@ -112,6 +112,66 @@ class SourceParsingTests(unittest.TestCase):
             self.assertIsNotNone(source.local_path)
 
 
+class BlobUrlParsingTests(unittest.TestCase):
+    """parse_github_source must accept /blob/ URLs and derive the skill root directory."""
+
+    def _parse(self, url: str) -> skills.InstallSource:
+        return skills.parse_github_source(url, None, None)
+
+    def test_root_skill_md_blob_url(self) -> None:
+        # blob/main/SKILL.md → repo root (sparse_path=None)
+        source = self._parse("https://github.com/owner/repo/blob/main/SKILL.md")
+        self.assertEqual(source.repo_url, "https://github.com/owner/repo.git")
+        self.assertEqual(source.branch, "main")
+        self.assertIsNone(source.sparse_path)
+
+    def test_nested_skill_md_blob_url(self) -> None:
+        # blob/main/humanizer/SKILL.md → sparse_path="humanizer"
+        source = self._parse("https://github.com/blader/humanizer/blob/main/humanizer/SKILL.md")
+        self.assertEqual(source.branch, "main")
+        self.assertEqual(source.sparse_path, "humanizer")
+
+    def test_blob_url_strips_query_string(self) -> None:
+        # ?plain=1 must be ignored
+        source = self._parse("https://github.com/owner/repo/blob/main/SKILL.md?plain=1")
+        self.assertIsNone(source.sparse_path)
+        self.assertEqual(source.branch, "main")
+
+    def test_blob_url_strips_fragment(self) -> None:
+        source = self._parse("https://github.com/owner/repo/blob/main/SKILL.md#L10")
+        self.assertIsNone(source.sparse_path)
+
+    def test_blob_url_url_encoded_path(self) -> None:
+        source = self._parse("https://github.com/owner/repo/blob/main/my%20skill/SKILL.md")
+        self.assertEqual(source.sparse_path, "my skill")
+
+    def test_blob_url_non_skill_file_uses_parent_dir(self) -> None:
+        # Any file path — skill root is always the parent directory
+        source = self._parse("https://github.com/owner/repo/blob/main/subdir/README.md")
+        self.assertEqual(source.sparse_path, "subdir")
+
+    def test_blob_url_missing_path_after_branch_raises(self) -> None:
+        # /blob/main with no file path
+        with self.assertRaises(skills.SkillInstallError):
+            self._parse("https://github.com/owner/repo/blob/main")
+
+    def test_blob_file_path_to_skill_dir_root_file(self) -> None:
+        self.assertIsNone(skills.blob_file_path_to_skill_dir("SKILL.md", "url"))
+
+    def test_blob_file_path_to_skill_dir_nested_file(self) -> None:
+        self.assertEqual(
+            skills.blob_file_path_to_skill_dir("a/b/SKILL.md", "url"), "a/b"
+        )
+
+    def test_blob_file_path_to_skill_dir_none_raises(self) -> None:
+        with self.assertRaises(skills.SkillInstallError):
+            skills.blob_file_path_to_skill_dir(None, "url")
+
+    def test_unsupported_path_type_raises(self) -> None:
+        with self.assertRaises(skills.SkillInstallError):
+            self._parse("https://github.com/owner/repo/commit/abc123")
+
+
 class TextScanTests(unittest.TestCase):
     def _issues(self, findings: list[dict[str, str]]) -> set[str]:
         return {item["issue"] for item in findings}

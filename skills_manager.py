@@ -991,15 +991,26 @@ def parse_github_source(
     path_from_url: str | None = None
 
     if len(parts) > 2:
-        if parts[2] != "tree":
-            raise SkillInstallError(
-                "Only repository URLs and GitHub /tree/<branch>/<path> URLs are supported"
+        if parts[2] == "tree":
+            if len(parts) < 4:
+                raise SkillInstallError("GitHub tree URL is missing a branch")
+            branch_from_url, path_from_url = resolve_tree_branch_and_path(
+                repo_url, parts[3:]
             )
-        if len(parts) < 4:
-            raise SkillInstallError("GitHub tree URL is missing a branch")
-        branch_from_url, path_from_url = resolve_tree_branch_and_path(
-            repo_url, parts[3:]
-        )
+        elif parts[2] == "blob":
+            if len(parts) < 4:
+                raise SkillInstallError("GitHub blob URL is missing a branch and path")
+            # Resolve branch the same way as /tree/ URLs.
+            # The resolved path is a file path; the skill root is its parent directory.
+            branch_from_url, file_path = resolve_tree_branch_and_path(
+                repo_url, parts[3:]
+            )
+            path_from_url = blob_file_path_to_skill_dir(file_path, raw_url)
+        else:
+            raise SkillInstallError(
+                "Only repository URLs, GitHub /tree/<branch>/<path> URLs, "
+                "and GitHub /blob/<branch>/<path>/SKILL.md URLs are supported"
+            )
 
     normalized_arg_path = normalize_repo_path(path_arg)
     normalized_url_path = normalize_repo_path(path_from_url)
@@ -1037,6 +1048,20 @@ def resolve_tree_branch_and_path(
     branch = tail_parts[0]
     sparse_path = "/".join(tail_parts[1:]) or None
     return branch, sparse_path
+
+
+def blob_file_path_to_skill_dir(file_path: str | None, raw_url: str) -> str | None:
+    """Convert a blob file path (relative to repo root) to the parent directory path.
+
+    Returns None when the file is at the repo root (sparse_path=None means clone root).
+    Raises SkillInstallError when no file path component is present.
+    """
+    if file_path is None:
+        raise SkillInstallError(
+            f"GitHub blob URL has no file path after the branch: {raw_url}"
+        )
+    parent = "/".join(file_path.split("/")[:-1])
+    return parent or None
 
 
 def list_remote_heads(repo_url: str) -> list[str]:
