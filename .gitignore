@@ -13,7 +13,9 @@ venv/
 # Tooling
 .mypy_cache/
 .ruff_cache/
+.claude/
 .pytest_cache/
+internal-tests/
 
 # Skills Manager runtime output
 skills-manager-security-result.json

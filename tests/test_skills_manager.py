@@ -34,14 +34,22 @@ class VersionTests(unittest.TestCase):
 class AgentResolutionTests(unittest.TestCase):
     def test_canonical_agent_aliases(self) -> None:
         self.assertEqual(skills.canonical_agent("claude"), "claude")
-        self.assertEqual(skills.canonical_agent("cloud-code"), "claude")
-        self.assertEqual(skills.canonical_agent("codecs"), "codex")
+        self.assertEqual(skills.canonical_agent("claude-code"), "claude")
+        self.assertEqual(skills.canonical_agent("claude_code"), "claude")
         self.assertEqual(skills.canonical_agent("open_code"), "opencode")
+        self.assertEqual(skills.canonical_agent("open-code"), "opencode")
         self.assertEqual(skills.canonical_agent("  Cursor  "), "cursor")
 
     def test_canonical_agent_rejects_unknown(self) -> None:
-        with self.assertRaises(skills.SkillInstallError):
-            skills.canonical_agent("emacs")
+        for value in ("emacs", "cloud", "cloud-code", "codecs"):
+            with self.subTest(value=value), self.assertRaises(skills.SkillInstallError):
+                skills.canonical_agent(value)
+
+    def test_help_omits_agent_aliases(self) -> None:
+        help_text = skills.build_parser().format_help()
+        self.assertNotIn("Aliases:", help_text)
+        self.assertNotIn("cloud-code", help_text)
+        self.assertNotIn("codecs", help_text)
 
 
 class PositiveIntTests(unittest.TestCase):

@@ -197,6 +197,8 @@ skills analyze cost ./path/to/skill --json
 
 Every installed command name is equivalent: `skill`, `skills`, `skill-manager`, and `skills-manager`.
 
+Use `claude`, `cursor`, `codex`, or `opencode` for agent arguments. For compatibility, `claude-code` and `claude_code` are accepted as `claude`, while `open-code` and `open_code` are accepted as `opencode`. CLI help stays focused on the canonical names.
+
 `skills scan` prints the full file list before scanning, then a compact relevant-files table after static checks, including `SKILL.md`, executable scripts, dependency manifests, hidden files, symlinks, archives, compiled payloads, and files with deterministic findings.
 
 ## What it checks
