@@ -22,6 +22,42 @@ I built it because installing a skill is riskier than it looks. A skill is a fol
 
 One file. No dependencies. Python standard library only.
 
+## Features
+
+### AI-powered security scanning
+
+> [!IMPORTANT]
+> **Use the agent you already trust to inspect a skill before installing it.** Add `--ai-checks` and Skills Manager sends the complete source inventory to Claude, Cursor, Codex, or OpenCode in a restricted sandbox. The AI reviewer looks for unsafe behavior and prompt-level threats that simple pattern matching cannot reliably identify, then its findings are merged with the deterministic security report.
+
+```bash
+# Static security scan followed by an independent Claude review
+skills scan https://github.com/owner/repo --ai-checks --agent claude
+
+# Ask Codex for a second opinion even when the static scan already blocked the source
+skills scan https://github.com/owner/repo --force-run-ai-checks --agent codex
+```
+
+AI review adds another layer; it never weakens the built-in security gate. A high or critical static finding still blocks installation, even when the AI review considers the source safe.
+
+### Everything Skills Manager can do
+
+| Feature | What it gives you |
+| --- | --- |
+| **Scan before installing** | Inspect GitHub repositories or local folders without copying anything into an agent's configuration. |
+| **Deterministic security checks** | Detect exposed secrets, dangerous shell execution, persistence hooks, registry hijacks, native loading, opaque payloads, filesystem tricks, and scanner evasion. |
+| **AI security scanning** | Run Claude, Cursor, Codex, or OpenCode as a sandboxed second reviewer and merge its findings into one verdict. |
+| **Safe installation** | Install only after security checks pass, using atomic copies that avoid leaving half-installed skills behind. |
+| **Recursive skill discovery** | Find and install every `SKILL.md` beneath a repository root, including skills stored in monorepos. |
+| **Multi-agent management** | Use the same workflow for Claude, Cursor, Codex, and OpenCode, with agent-specific install locations. |
+| **Installed-skill inventory** | List skills across one or every supported agent, with optional descriptions and installation paths. |
+| **Tracked updates** | Re-fetch original sources, compare them with installed copies, rescan changes, and apply only approved updates. |
+| **Safe uninstall** | Preview removals by default, target one agent or all agents, and require explicit confirmation before deleting anything. |
+| **Context-cost analysis** | Estimate metadata, activated-skill, and full-directory token usage while validating front matter, links, names, and file sizes. |
+| **CI enforcement** | Emit a machine-readable JSON verdict, send findings to stderr, save full reports as artifacts, and fail the job when a source is unsafe. |
+| **Flexible sources** | Work with GitHub repository URLs, tree URLs, SSH remotes, branches, tags, subdirectories, and local folders. |
+| **Automation-friendly output** | Save normalized security reports with `--output` and cost reports with `--json`. |
+| **Zero-dependency CLI** | Run the single Python file directly or install the package and use any of its four command names. |
+
 ## See it catch a bad skill
 
 Here's Skills Manager refusing a skill that ships a private key, a `curl | sh` bootstrap, and an `rm -rf`. The install is blocked and nothing is copied to disk:
