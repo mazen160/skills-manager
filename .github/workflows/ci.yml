@@ -52,6 +52,8 @@ jobs:
           skills --version
           skill-manager --version
           skills-manager --version
+          agentic-skill-manager --version
+          agentic-skills-manager --version
 
       - name: Verify banner output
         run: skill --banner

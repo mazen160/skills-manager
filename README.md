@@ -114,7 +114,7 @@ curl -O https://raw.githubusercontent.com/mazen160/skills-manager/main/skills_ma
 python3 skills_manager.py --help
 ```
 
-> The PyPI distribution is `agentic-skills-manager`. The product is still Skills Manager, and installing it gives you four equivalent commands: `skill`, `skills`, `skill-manager`, and `skills-manager`. If you're running from source, use `python3 skills_manager.py`.
+> The PyPI distribution is `agentic-skills-manager`. The product is still Skills Manager, and installing it gives you six equivalent commands: `skill`, `skills`, `skill-manager`, `skills-manager`, `agentic-skill-manager`, and `agentic-skills-manager`. If you're running from source, use `python3 skills_manager.py`.
 
 Run `skills` with no arguments for the full command surface:
 
@@ -195,7 +195,7 @@ skills analyze cost ./path/to/skill --json
 | `skills --banner` | Print the Skills Manager banner and exit. |
 | `skills --version` | Print the installed Skills Manager version. |
 
-Every installed command name is equivalent: `skill`, `skills`, `skill-manager`, and `skills-manager`.
+Every installed command name is equivalent: `skill`, `skills`, `skill-manager`, `skills-manager`, `agentic-skill-manager`, and `agentic-skills-manager`.
 
 Use `claude`, `cursor`, `codex`, or `opencode` for agent arguments. For compatibility, `claude-code` and `claude_code` are accepted as `claude`, while `open-code` and `open_code` are accepted as `opencode`. CLI help stays focused on the canonical names.
 

@@ -354,7 +354,14 @@ class CommandAliasTests(unittest.TestCase):
     def test_all_aliases_in_entry_points(self) -> None:
         pyproject = Path(__file__).resolve().parent.parent / "pyproject.toml"
         text = pyproject.read_text(encoding="utf-8")
-        for alias in ("skill", "skills", "skill-manager", "skills-manager"):
+        for alias in (
+            "skill",
+            "skills",
+            "skill-manager",
+            "skills-manager",
+            "agentic-skill-manager",
+            "agentic-skills-manager",
+        ):
             self.assertIn(alias, text, f"alias {alias!r} missing from pyproject.toml")
 
     def test_main_is_callable(self) -> None:

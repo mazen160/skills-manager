@@ -49,6 +49,8 @@ skill = "skills_manager:main"
 skills = "skills_manager:main"
 skill-manager = "skills_manager:main"
 skills-manager = "skills_manager:main"
+agentic-skill-manager = "skills_manager:main"
+agentic-skills-manager = "skills_manager:main"
 
 [tool.setuptools]
 py-modules = ["skills_manager"]
