@@ -13,8 +13,8 @@ venv/
 .ruff_cache/
 .pytest_cache/
 
-# skills.py runtime output
-skills-security-result.json
+# Skills Manager runtime output
+skills-manager-security-result.json
 
 # OS / editor
 .DS_Store

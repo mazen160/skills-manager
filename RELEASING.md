@@ -1,6 +1,6 @@
 # Releasing
 
-`skills.py` ships to PyPI as [`skills-package-manager`](https://pypi.org/project/skills-package-manager/). The import module is `skills` and the installed command is `skills`.
+Skills Manager ships to PyPI as [`skills-manager`](https://pypi.org/project/skills-manager/). The import module is `skills_manager`.
 
 ## One-time setup
 
@@ -36,15 +36,18 @@ python3 -m twine check dist/*
 
 ```bash
 python3 -m venv /tmp/skills-test
-/tmp/skills-test/bin/pip install dist/skills_package_manager-*.whl
+/tmp/skills-test/bin/pip install dist/skills_manager-*.whl
 /tmp/skills-test/bin/skills --help
+/tmp/skills-test/bin/skill --banner
+/tmp/skills-test/bin/skill-manager --banner
+/tmp/skills-test/bin/skills-manager --banner
 ```
 
 5. (Optional) Upload to TestPyPI first:
 
 ```bash
 python3 -m twine upload --repository testpypi dist/*
-pip install --index-url https://test.pypi.org/simple/ skills-package-manager
+pip install --index-url https://test.pypi.org/simple/ skills-manager
 ```
 
 6. Upload to PyPI:
@@ -63,9 +66,11 @@ git push origin v0.1.0
 ## After release
 
 ```bash
-pip install skills-package-manager
-skills --help        # primary command
-skills.py --help     # same tool, branded name
+pip install skills-manager
+skills --help
+skill --help
+skill-manager --help
+skills-manager --help
 ```
 
-Installing the package puts three equivalent commands on `PATH`: `skills`, `skills.py`, and `skills-package-manager`.
+Installing the package puts four equivalent commands on `PATH`: `skill`, `skills`, `skill-manager`, and `skills-manager`.

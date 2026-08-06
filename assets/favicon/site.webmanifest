@@ -1,6 +1,6 @@
 {
-  "name": "skills.py",
-  "short_name": "skills.py",
+  "name": "Skills Manager",
+  "short_name": "Skills",
   "description": "Scan, install, and update AI agent skills safely.",
   "icons": [
     { "src": "web-app-icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any maskable" },

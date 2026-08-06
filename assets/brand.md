@@ -1,4 +1,4 @@
-# skills.py brand assets
+# Skills Manager brand assets
 
 The mark is a shield with a terminal prompt (`>_`) cut out of it: security plus the command line, in one shape. Everything here is rendered from the source SVGs, so you can re-export any size without quality loss.
 
@@ -7,10 +7,10 @@ The mark is a shield with a terminal prompt (`>_`) cut out of it: security plus 
 | Token | Hex | Use |
 | --- | --- | --- |
 | Background | `#0D1117` | Dark surfaces, icon tile, social cards |
-| Green (primary) | `#3FB950` | The mark and the `.py`, on dark |
-| Green (on light) | `#2DA44E` | The mark and the `.py`, on white/light |
-| Text | `#E6EDF3` | `skills` wordmark on dark |
-| Text (on light) | `#1F2328` | `skills` wordmark on light |
+| Green (primary) | `#3FB950` | The mark and `Manager`, on dark |
+| Green (on light) | `#2DA44E` | The mark and `Manager`, on white/light |
+| Text | `#E6EDF3` | `Skills` wordmark on dark |
+| Text (on light) | `#1F2328` | `Skills` wordmark on light |
 | Muted | `#8B949E` | Subtitles, captions |
 | Faint | `#586069` | URLs, fine print |
 

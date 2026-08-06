@@ -1,18 +1,18 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="384" height="112" viewBox="0 0 384 112" role="img" aria-label="skills.py logo">
+<svg xmlns="http://www.w3.org/2000/svg" width="530" height="112" viewBox="0 0 530 112" role="img" aria-label="Skills Manager logo">
   <defs>
     <mask id="prompt">
-      <rect width="384" height="112" fill="#fff"/>
+      <rect width="530" height="112" fill="#fff"/>
       <g fill="none" stroke="#000" stroke-width="4.4" stroke-linecap="round" stroke-linejoin="round">
         <path d="M23.5 25.5 L30.5 31.5 L23.5 37.5"/>
         <line x1="33.5" y1="37.5" x2="40.5" y2="37.5"/>
       </g>
     </mask>
   </defs>
-  <rect width="384" height="112" rx="22" fill="#0D1117"/>
+  <rect width="530" height="112" rx="22" fill="#0D1117"/>
   <path d="M32 6.5 L53 13.5 V32 C53 44.2 44 52.2 32 57.5 C20 52.2 11 44.2 11 32 V13.5 Z"
         transform="translate(28 24)"
         fill="#3FB950" stroke="#3FB950" stroke-width="4.5" stroke-linejoin="round" mask="url(#prompt)"/>
   <text x="116" y="70" font-family="ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, monospace" font-size="46" font-weight="700" letter-spacing="-1">
-    <tspan fill="#E6EDF3">skills</tspan><tspan fill="#3FB950">.py</tspan>
+    <tspan fill="#E6EDF3">Skills</tspan><tspan dx="0.35em" fill="#3FB950">Manager</tspan>
   </text>
 </svg>

@@ -1,14 +1,15 @@
 [build-system]
-requires = ["setuptools>=61"]
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "skills-package-manager"
+name = "skills-manager"
 version = "0.1.0"
-description = "skills.py: scan, install, and update AI agent skills safely across Claude, Cursor, Codex, and OpenCode."
+description = "Skills Manager: scan, install, update, and analyze AI agent skills safely across Claude, Cursor, Codex, and OpenCode."
 readme = "README.md"
 requires-python = ">=3.9"
-license = { text = "MIT" }
+license = "MIT"
+license-files = ["LICENSE"]
 authors = [{ name = "Mazin Ahmed" }]
 keywords = [
     "ai-agents",
@@ -24,7 +25,6 @@ classifiers = [
     "Development Status :: 4 - Beta",
     "Environment :: Console",
     "Intended Audience :: Developers",
-    "License :: OSI Approved :: MIT License",
     "Operating System :: OS Independent",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.9",
@@ -38,19 +38,16 @@ classifiers = [
 dependencies = []
 
 [project.urls]
-Homepage = "https://github.com/mazen160/skills.py"
-Repository = "https://github.com/mazen160/skills.py"
-Issues = "https://github.com/mazen160/skills.py/issues"
-"PyPI" = "https://pypi.org/project/skills-package-manager/"
+Homepage = "https://github.com/mazen160/skills-manager"
+Repository = "https://github.com/mazen160/skills-manager"
+Issues = "https://github.com/mazen160/skills-manager/issues"
+"PyPI" = "https://pypi.org/project/skills-manager/"
 
 [project.scripts]
-skills = "skills:main"
-skills-package-manager = "skills:main"
+skill = "skills_manager:main"
+skills = "skills_manager:main"
+skill-manager = "skills_manager:main"
+skills-manager = "skills_manager:main"
 
 [tool.setuptools]
-py-modules = ["skills"]
-license-files = ["LICENSE"]
-# Installs the actual skills.py file onto PATH so `skills.py` also works as a
-# command. It can't be a console-script entry point: a generated launcher named
-# skills.py would shadow `import skills` and break every command.
-script-files = ["skills.py"]
+py-modules = ["skills_manager"]

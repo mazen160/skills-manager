@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
-"""Manage, scan, and install agent skills from GitHub or local folders."""
+"""Skills Manager: safely manage agent skills from GitHub or local folders."""
 
 from __future__ import annotations
 
 import argparse
 import hashlib
+import io
 import json
+import math
 import os
 import re
 import shutil
@@ -16,12 +18,16 @@ import tempfile
 import textwrap
 import time
 import zipfile
-from contextlib import contextmanager
+from collections import Counter
+from contextlib import contextmanager, redirect_stdout
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any, Iterable, Iterator
 from urllib.parse import unquote, urlparse
+
+
+# Constants, branding, and terminal output
 
 
 SUPPORTED_AGENTS = ("claude", "cursor", "codex", "opencode")
@@ -46,13 +52,13 @@ SUPPORTED_AGENT_HELP = (
 
 # Minimalist, source-readable ASCII wordmark for the CLI. Pure ASCII only
 # (no Unicode / binary) so the banner is as inspectable as the skills it vets.
-BANNER = r"""     _    _ _ _
- ___| | _(_) | |___   _ __  _   _
-/ __| |/ / | | / __| | '_ \| | | |
-\__ \   <| | | \__ \_| |_) | |_| |
-|___/_|\_\_|_|_|___(_) .__/ \__, |
-                      |_|    |___/
- [+] >_ source-readable skills | claude  cursor  codex  opencode"""
+BANNER = r"""  ____  _    _ _ _       __  __
+ / ___|| | _(_) | |___  |  \/  | __ _ _ __   __ _  __ _  ___ _ __
+ \___ \| |/ / | | / __| | |\/| |/ _` | '_ \ / _` |/ _` |/ _ \ '__|
+  ___) |   <| | | \__ \ | |  | | (_| | | | | (_| | (_| |  __/ |
+ |____/|_|\_\_|_|_|___/ |_|  |_|\__,_|_| |_|\__,_|\__, |\___|_|
+                                                   |___/
+ Secure installs for Claude, Cursor, Codex, and OpenCode"""
 
 # Brand palette as 24-bit truecolor ANSI; reset clears it.
 _ANSI_RESET = "\033[0m"
@@ -63,7 +69,6 @@ _COLORS = {
     "yellow": "\033[38;2;210;153;34m",
     "dim": "\033[38;2;139;148;158m",
 }
-_SCAN_GREEN = _COLORS["green"]
 _SEVERITY_COLORS = {"critical": "red", "high": "orange", "medium": "yellow", "low": "dim"}
 
 
@@ -78,7 +83,6 @@ def _use_color(stream: Any = None) -> bool:
 
 
 def paint(text: str, color: str, stream: Any = None) -> str:
-    """Wrap text in a brand ANSI color when the stream supports color."""
     code = _COLORS.get(color)
     if not code or not _use_color(stream):
         return text
@@ -90,7 +94,6 @@ def severity_color(severity: str) -> str:
 
 
 def render_banner(stream: Any = None) -> str:
-    """Return the banner, tinted scan-green when the stream supports color."""
     return paint(BANNER, "green", stream)
 
 
@@ -103,6 +106,7 @@ MAX_TEXT_REVIEW_CHARS = AVERAGE_REVIEW_CHARS_PER_LINE * MAX_TEXT_REVIEW_LINES
 MAX_INVENTORY_FILES = 5000
 MAX_RELEVANT_FILE_DISPLAY = 80
 MAX_ZIP_MEMBERS = 1000
+FILE_READ_CHUNK_BYTES = 1024 * 1024
 BLOCKED_BYTECODE_SUFFIXES = {".pyc", ".pyo"}
 BLOCKED_NATIVE_SUFFIXES = {".so", ".dylib", ".dll", ".pyd", ".node", ".class", ".jar"}
 ARCHIVE_SUFFIXES = {".zip", ".tar", ".gz", ".tgz", ".xz", ".bz2", ".7z", ".rar"}
@@ -154,6 +158,33 @@ SENSITIVE_DOTFILES = {
     ".gitconfig",
 }
 PERSISTENCE_DIR_NAMES = {".husky", "hooks", "git-hooks"}
+
+# Cost analyzer (`skills analyze cost`) constants.
+SKILL_FILENAME = "SKILL.md"
+LOAD_MODE_LABELS = {
+    "metadata": "metadata catalog",
+    "skill": "activated SKILL.md",
+    "full": "full directory",
+}
+DEFAULT_SKIP_DIRS = {
+    ".git",
+    ".hg",
+    ".svn",
+    "__pycache__",
+    ".mypy_cache",
+    ".pytest_cache",
+    ".ruff_cache",
+    "node_modules",
+    "dist",
+    "build",
+}
+MARKDOWN_LINK_RE = re.compile(r"!?\[[^\]]*\]\(([^)]+)\)")
+SCHEME_RE = re.compile(r"^[a-zA-Z][a-zA-Z0-9+.-]*:")
+WORD_RE = re.compile(r"\S+")
+NON_NAME_RE = re.compile(r"[^a-z0-9-]+")
+
+
+# Data models
 
 
 @dataclass(frozen=True)
@@ -223,6 +254,15 @@ class SkillInstallError(Exception):
     """User-facing installation failure."""
 
 
+# Cost analyzer (`skills analyze cost`) report shapes.
+Finding = dict[str, Any]
+FileUsage = dict[str, Any]
+SkillReport = dict[str, Any]
+
+
+# CLI entry point and argument parser
+
+
 def main() -> int:
     parser = build_parser()
     if len(sys.argv) == 1:
@@ -231,18 +271,7 @@ def main() -> int:
     args = parser.parse_args()
 
     try:
-        if args.command == "list":
-            return run_list_command(args)
-        if args.command == "scan":
-            return run_scan_command(args)
-        if args.command == "install":
-            return run_install_command(args)
-        if args.command == "update":
-            return run_update_command(args)
-        if args.command == "uninstall":
-            return run_uninstall_command(args)
-        parser.error("missing command")
-        return 2
+        return args.handler(args)
     except SkillInstallError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
@@ -256,6 +285,12 @@ def build_parser() -> argparse.ArgumentParser:
         description=f"{render_banner()}\n\nManage Claude, Cursor, Codex, or OpenCode skills.",
         epilog=SUPPORTED_AGENT_HELP,
         formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    parser.add_argument(
+        "--banner",
+        action="version",
+        version=render_banner(),
+        help="Print the Skills Manager banner and exit",
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
@@ -272,6 +307,17 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Run second-round AI checks after static checks pass",
     )
+    scan_parser.add_argument(
+        "--force-run-ai-checks",
+        action="store_true",
+        help="Run AI checks even when static checks fail (implies --ai-checks; does not override the static block)",
+    )
+    scan_parser.add_argument(
+        "--ci",
+        action="store_true",
+        help="CI mode: suppress decorative output, print findings to stderr and a machine-readable verdict (JSON) to stdout, exit non-zero when unsafe",
+    )
+    scan_parser.set_defaults(handler=run_scan_command)
 
     list_parser = subparsers.add_parser(
         "list",
@@ -287,6 +333,7 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Show descriptions and install directories",
     )
+    list_parser.set_defaults(handler=run_list_command)
 
     install_parser = subparsers.add_parser(
         "install",
@@ -310,10 +357,16 @@ def build_parser() -> argparse.ArgumentParser:
         help="Run second-round AI checks after static checks pass",
     )
     install_parser.add_argument(
+        "--force-run-ai-checks",
+        action="store_true",
+        help="Run AI checks even when static checks fail (implies --ai-checks); installation stays blocked by static findings",
+    )
+    install_parser.add_argument(
         "--force",
         action="store_true",
         help="Overwrite already-installed skills instead of skipping them",
     )
+    install_parser.set_defaults(handler=run_install_command)
 
     update_parser = subparsers.add_parser(
         "update",
@@ -350,19 +403,21 @@ def build_parser() -> argparse.ArgumentParser:
     )
     update_parser.add_argument(
         "--security-timeout-seconds",
-        type=int,
+        type=positive_int,
         default=300,
         help="Timeout for AI checks (default: 300)",
     )
     update_parser.add_argument(
-        "--security-result-file",
-        help="Save the last normalized security result JSON to this path",
+        "--output",
+        metavar="PATH",
+        help="Write the last normalized security result JSON to PATH",
     )
     update_parser.add_argument(
         "--show-ai-inputs",
         action="store_true",
         help="Print the full AI prompt and deterministic inventory when --ai-checks is used",
     )
+    update_parser.set_defaults(handler=run_update_command)
 
     uninstall_parser = subparsers.add_parser(
         "uninstall",
@@ -387,7 +442,79 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Actually remove matching skill directories",
     )
+    uninstall_parser.set_defaults(handler=run_uninstall_command)
+
+    analyze_parser = subparsers.add_parser(
+        "analyze",
+        help="Analyze installed or local skills",
+        description="Run analysis subcommands over local skill folders.",
+    )
+    analyze_subparsers = analyze_parser.add_subparsers(
+        dest="analyze_command", required=True
+    )
+    cost_parser = analyze_subparsers.add_parser(
+        "cost",
+        help="Estimate skill context usage and find invalid skills",
+        description="Analyze agent skill folders for context usage and invalid skill definitions.",
+    )
+    add_analyze_cost_arguments(cost_parser)
+    cost_parser.set_defaults(handler=run_analyze_cost_command)
     return parser
+
+
+def add_analyze_cost_arguments(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "roots",
+        nargs="+",
+        help="One or more skill roots, or a single skill directory containing SKILL.md.",
+    )
+    parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Print machine-readable JSON instead of a terminal report.",
+    )
+    parser.add_argument(
+        "--no-files",
+        action="store_true",
+        help="Omit per-file records from JSON output.",
+    )
+    parser.add_argument(
+        "--load-mode",
+        choices=tuple(LOAD_MODE_LABELS),
+        default="full",
+        help=(
+            "Choose which context estimate sorts and headlines the text report: "
+            "metadata catalog, activated SKILL.md, or full directory. Default: full."
+        ),
+    )
+    parser.add_argument(
+        "--include-hidden",
+        action="store_true",
+        help="Include hidden files and directories except known build/cache directories.",
+    )
+    parser.add_argument(
+        "--max-skill-tokens",
+        type=positive_int,
+        default=50000,
+        help="Warn when a full skill directory exceeds this estimated token count. Default: 50000.",
+    )
+    parser.add_argument(
+        "--max-file-tokens",
+        type=positive_int,
+        default=10000,
+        help="Warn when a single file exceeds this estimated token count. Default: 10000.",
+    )
+    parser.add_argument(
+        "--top",
+        type=positive_int,
+        default=10,
+        help="Number of largest skills, extensions, and files to show in text output. Default: 10.",
+    )
+    parser.add_argument(
+        "--fail-on-invalid",
+        action="store_true",
+        help="Exit with code 1 when invalid skills or root errors are found.",
+    )
 
 
 def add_source_arguments(parser: argparse.ArgumentParser) -> None:
@@ -413,19 +540,35 @@ def add_security_arguments(
     )
     parser.add_argument(
         "--security-timeout-seconds",
-        type=int,
+        type=positive_int,
         default=300,
         help="Timeout for AI checks (default: 300)",
     )
     parser.add_argument(
-        "--security-result-file",
-        help="Save the normalized security result JSON to this path",
+        "--output",
+        metavar="PATH",
+        help="Write the full normalized security result JSON to PATH",
     )
     parser.add_argument(
         "--show-ai-inputs",
         action="store_true",
         help="Print the full AI prompt and deterministic inventory when --ai-checks is used",
     )
+
+
+def positive_int(value: str) -> int:
+    try:
+        number = int(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError(
+            f"expected a positive integer, got {value!r}"
+        ) from None
+    if number < 1:
+        raise argparse.ArgumentTypeError(f"must be at least 1, got {number}")
+    return number
+
+
+# Command runners
 
 
 def run_list_command(args: argparse.Namespace) -> int:
@@ -439,13 +582,16 @@ def run_list_command(args: argparse.Namespace) -> int:
 
 
 def run_scan_command(args: argparse.Namespace) -> int:
+    if args.ci:
+        return run_scan_ci_command(args)
+
     started_at = time.monotonic()
     ai_agent = canonical_agent(args.agent)
 
     with prepared_source(args.source, args.path, args.branch) as prepared:
         install_root, security_root = prepared.install_root, prepared.security_root
         result_file, result_saved = resolve_security_result_path(
-            args.security_result_file, security_root
+            args.output, security_root
         )
         inventory = build_security_inventory(install_root)
         print_files_to_scan(inventory)
@@ -456,11 +602,30 @@ def run_scan_command(args: argparse.Namespace) -> int:
         )
         print_relevant_scan_files(inventory)
         print_security_result(static_result, result_file, result_saved)
-        if not is_security_result_safe(static_result):
+        static_safe = is_security_result_safe(static_result)
+        ai_enabled = args.ai_checks or args.force_run_ai_checks
+
+        if not static_safe and not args.force_run_ai_checks:
+            if ai_enabled:
+                print(
+                    paint(
+                        "Skipping AI checks: static security checks already blocked this source. "
+                        "Re-run with --force-run-ai-checks to run them anyway.",
+                        "yellow",
+                    )
+                )
             print_elapsed("Scan completed", started_at)
             return 1
 
-        if args.ai_checks:
+        if ai_enabled:
+            if not static_safe:
+                print(
+                    paint(
+                        "Static security checks blocked this source, but --force-run-ai-checks "
+                        "is set; running AI checks anyway.",
+                        "yellow",
+                    )
+                )
             ai_result = run_ai_security_checks(
                 scan_root=install_root,
                 artifact_root=security_root,
@@ -474,8 +639,47 @@ def run_scan_command(args: argparse.Namespace) -> int:
             if not is_security_result_safe(ai_result):
                 print_elapsed("Scan completed", started_at)
                 return 1
+
+        if not static_safe:
+            print_elapsed("Scan completed", started_at)
+            return 1
     print_elapsed("Scan completed", started_at)
     return 0
+
+
+def run_scan_ci_command(args: argparse.Namespace) -> int:
+    ai_agent = canonical_agent(args.agent)
+    ai_enabled = args.ai_checks or args.force_run_ai_checks
+
+    # CI mode prints only the verdict and findings, so swallow the human-facing
+    # progress output that the scan path writes to stdout while it works.
+    with redirect_stdout(io.StringIO()):
+        with prepared_source(args.source, args.path, args.branch) as prepared:
+            install_root, security_root = prepared.install_root, prepared.security_root
+            result_file, _ = resolve_security_result_path(
+                args.output, security_root
+            )
+            inventory, final_result = run_static_security_checks(
+                scan_root=install_root,
+                output_result_file=result_file,
+            )
+            static_safe = is_security_result_safe(final_result)
+            ai_ran = ai_enabled and (static_safe or args.force_run_ai_checks)
+            if ai_ran:
+                final_result = run_ai_security_checks(
+                    scan_root=install_root,
+                    artifact_root=security_root,
+                    output_result_file=result_file,
+                    agent=ai_agent,
+                    timeout_seconds=args.security_timeout_seconds,
+                    inventory=inventory,
+                    show_inputs=False,
+                )
+
+    print_ci_security_result(
+        final_result, source=args.source, ai_skipped=ai_enabled and not ai_ran
+    )
+    return 0 if is_security_result_safe(final_result) else 1
 
 
 def run_install_command(args: argparse.Namespace) -> int:
@@ -485,9 +689,19 @@ def run_install_command(args: argparse.Namespace) -> int:
     with prepared_source(args.source, args.path, args.branch) as prepared:
         install_root, security_root = prepared.install_root, prepared.security_root
         result_file, result_saved = resolve_security_result_path(
-            args.security_result_file, security_root
+            args.output, security_root
         )
-        skill_roots = discover_skill_roots(install_root, args.recursive)
+        skill_roots = (
+            discover_skill_dirs(
+                install_root,
+                include_hidden=True,
+                include_nested=True,
+            )
+            if args.recursive
+            else [install_root]
+            if (install_root / SKILL_FILENAME).is_file()
+            else []
+        )
         if not skill_roots:
             mode = "recursively" if args.recursive else "at the selected root"
             raise SkillInstallError(f"No SKILL.md files found {mode}: {install_root}")
@@ -498,7 +712,18 @@ def run_install_command(args: argparse.Namespace) -> int:
             output_result_file=result_file,
         )
         print_security_result(static_result, result_file, result_saved)
-        if not is_security_result_safe(static_result):
+        static_safe = is_security_result_safe(static_result)
+        ai_enabled = args.ai_checks or args.force_run_ai_checks
+
+        if not static_safe and not args.force_run_ai_checks:
+            if ai_enabled:
+                print(
+                    paint(
+                        "Skipping AI checks: static security checks already blocked installation. "
+                        "Re-run with --force-run-ai-checks to run them anyway.",
+                        "yellow",
+                    )
+                )
             elapsed = format_elapsed(time.monotonic() - started_at)
             raise SkillInstallError(
                 "Static security checks blocked installation. "
@@ -506,7 +731,15 @@ def run_install_command(args: argparse.Namespace) -> int:
                 f"(elapsed {elapsed})"
             )
 
-        if args.ai_checks:
+        if ai_enabled:
+            if not static_safe:
+                print(
+                    paint(
+                        "Static security checks blocked installation, but --force-run-ai-checks "
+                        "is set; running AI checks anyway.",
+                        "yellow",
+                    )
+                )
             ai_result = run_ai_security_checks(
                 scan_root=install_root,
                 artifact_root=security_root,
@@ -524,6 +757,15 @@ def run_install_command(args: argparse.Namespace) -> int:
                     f"Result: {format_security_result_location(result_file, result_saved)} "
                     f"(elapsed {elapsed})"
                 )
+
+        if not static_safe:
+            elapsed = format_elapsed(time.monotonic() - started_at)
+            raise SkillInstallError(
+                "Static security checks blocked installation; --force-run-ai-checks runs the "
+                "AI review but does not override static findings. "
+                f"Result: {format_security_result_location(result_file, result_saved)} "
+                f"(elapsed {elapsed})"
+            )
 
         records = install_skills(
             skill_roots,
@@ -557,9 +799,9 @@ def run_update_command(args: argparse.Namespace) -> int:
         print(f"No installed {target!r} found for {agent_text}.")
         return 1
 
-    with tempfile.TemporaryDirectory(prefix="skills-result-") as temp_name:
+    with tempfile.TemporaryDirectory(prefix="skills-manager-result-") as temp_name:
         result_file, result_saved = resolve_security_result_path(
-            args.security_result_file, Path(temp_name)
+            args.output, Path(temp_name)
         )
         records: list[UpdateRecord] = []
         for skill in installed:
@@ -613,6 +855,37 @@ def run_uninstall_command(args: argparse.Namespace) -> int:
         )
     print_uninstall_summary(records)
     return 0
+
+
+def run_analyze_cost_command(args: argparse.Namespace) -> int:
+    reports, root_findings = analyze_roots(args)
+    summary = summarize(reports, root_findings)
+
+    if args.json:
+        print(
+            json.dumps(
+                build_json_report(
+                    reports,
+                    root_findings,
+                    summary,
+                    include_files=not args.no_files,
+                    load_mode=args.load_mode,
+                ),
+                indent=2,
+                sort_keys=True,
+            )
+        )
+    else:
+        print_text_report(reports, root_findings, summary, args.top, args.load_mode)
+
+    if root_findings:
+        return 2
+    if args.fail_on_invalid and summary["invalid_skills"]:
+        return 1
+    return 0
+
+
+# Source resolution and fetching
 
 
 @contextmanager
@@ -806,17 +1079,21 @@ def normalize_repo_path(value: str | None) -> str | None:
 def clone_source(source: InstallSource, clone_root: Path) -> None:
     if source.repo_url is None:
         raise SkillInstallError("Cannot clone a local source")
+    if source.branch and source.branch.startswith("-"):
+        raise SkillInstallError(f"Invalid branch or tag name: {source.branch!r}")
     command = ["git", "clone"]
     if source.branch:
         command.extend(["--branch", source.branch])
     if source.sparse_path:
         command.extend(["--filter=blob:none", "--sparse"])
-    command.extend([source.repo_url, str(clone_root)])
+    # "--" terminates option parsing so a hostile repo URL or path can never be
+    # smuggled in as a git flag (argument injection).
+    command.extend(["--", source.repo_url, str(clone_root)])
     run_checked(command)
 
     if source.sparse_path:
         run_checked(
-            ["git", "-C", str(clone_root), "sparse-checkout", "set", source.sparse_path]
+            ["git", "-C", str(clone_root), "sparse-checkout", "set", "--", source.sparse_path]
         )
 
 
@@ -849,16 +1126,7 @@ def resolve_install_root(clone_root: Path, sparse_path: str | None) -> Path:
     return install_root_resolved
 
 
-def discover_skill_roots(root: Path, recursive: bool) -> list[Path]:
-    if not recursive:
-        return [root] if (root / "SKILL.md").is_file() else []
-
-    skill_roots: list[Path] = []
-    for current_root, dirnames, filenames in os.walk(root):
-        dirnames[:] = [name for name in dirnames if name not in {".git", "__pycache__"}]
-        if "SKILL.md" in filenames:
-            skill_roots.append(Path(current_root))
-    return sorted(skill_roots, key=lambda path: str(path.relative_to(root)))
+# Install, update, and tracking
 
 
 def install_skills(
@@ -1140,6 +1408,9 @@ def directory_fingerprint(root: Path) -> dict[str, dict[str, Any]]:
     return fingerprint
 
 
+# Installed-skill locations, listing, and reporting
+
+
 def agent_skill_dir(agent: str) -> Path:
     dirs = agent_skill_dirs(agent)
     if agent == "cursor":
@@ -1234,46 +1505,17 @@ def find_installed_skill_targets(
 
 def read_skill_metadata(skill_file: Path) -> dict[str, str]:
     try:
-        lines = skill_file.read_text(encoding="utf-8", errors="replace").splitlines()
+        text = skill_file.read_text(encoding="utf-8", errors="replace")
     except OSError:
         return {}
-
-    if not lines or lines[0].strip() != "---":
+    metadata, _, has_front_matter = parse_front_matter(text)
+    if not has_front_matter:
         return {}
-
-    frontmatter: list[str] = []
-    for line in lines[1:100]:
-        if line.strip() == "---":
-            break
-        frontmatter.append(line)
-
-    metadata: dict[str, str] = {}
-    index = 0
-    while index < len(frontmatter):
-        line = frontmatter[index]
-        stripped = line.strip()
-        if not stripped or stripped.startswith("#") or ":" not in stripped:
-            index += 1
-            continue
-        key, value = stripped.split(":", 1)
-        key = key.strip().lower()
-        if key in {"name", "description"}:
-            value = value.strip()
-            if value.startswith(("|", ">")):
-                block_lines: list[str] = []
-                index += 1
-                while index < len(frontmatter):
-                    block_line = frontmatter[index]
-                    if block_line.strip() and not block_line.startswith((" ", "\t")):
-                        index -= 1
-                        break
-                    block_lines.append(block_line.strip())
-                    index += 1
-                metadata[key] = "\n".join(block_lines).strip()
-            else:
-                metadata[key] = value.strip("\"'")
-        index += 1
-    return metadata
+    return {
+        key: metadata[key]
+        for key in ("name", "description")
+        if metadata.get(key)
+    }
 
 
 def print_installed_skills(
@@ -1401,6 +1643,9 @@ def print_update_summary(records: list[UpdateRecord], applied: bool) -> None:
         print("No updates applied. Re-run with --apply to install available updates.")
 
 
+# Shared formatting and filesystem helpers
+
+
 def truncate_text(value: str, max_length: int) -> str:
     if len(value) <= max_length:
         return value
@@ -1458,7 +1703,10 @@ def remove_existing(path: Path) -> None:
         raise SkillInstallError(f"Cannot remove existing path: {path}")
 
 
-def enforce_security(
+# Security orchestration and static checks
+
+
+def run_ai_security_checks(
     scan_root: Path,
     artifact_root: Path,
     output_result_file: Path,
@@ -1472,8 +1720,8 @@ def enforce_security(
 
     if inventory is None:
         inventory = build_security_inventory(scan_root)
-    inventory_file = artifact_root / "skills-ai-inventory.json"
-    prompt_file = artifact_root / "skills-ai-prompt.txt"
+    inventory_file = artifact_root / "skills-manager-ai-inventory.json"
+    prompt_file = artifact_root / "skills-manager-ai-prompt.txt"
     temp_result_file = artifact_root / output_result_file.name
     write_json(inventory_file, inventory)
 
@@ -1511,26 +1759,6 @@ def enforce_security(
     return normalized
 
 
-def run_ai_security_checks(
-    scan_root: Path,
-    artifact_root: Path,
-    output_result_file: Path,
-    agent: str,
-    timeout_seconds: int,
-    inventory: dict[str, Any] | None = None,
-    show_inputs: bool = False,
-) -> dict[str, Any]:
-    return enforce_security(
-        scan_root=scan_root,
-        artifact_root=artifact_root,
-        output_result_file=output_result_file,
-        agent=agent,
-        timeout_seconds=timeout_seconds,
-        inventory=inventory,
-        show_inputs=show_inputs,
-    )
-
-
 def run_static_security_checks(
     scan_root: Path,
     output_result_file: Path,
@@ -1566,6 +1794,9 @@ def build_static_security_result(inventory: dict[str, Any]) -> dict[str, Any]:
         "reviewed_at": datetime.now(timezone.utc).isoformat(),
         "file_count": inventory.get("file_count", 0),
     }
+
+
+# Scan output
 
 
 def print_files_to_scan(inventory: dict[str, Any]) -> None:
@@ -1687,6 +1918,9 @@ def format_file_size(value: Any) -> str:
     if value < 1024 * 1024:
         return f"{value / 1024:.1f}K"
     return f"{value / (1024 * 1024):.1f}M"
+
+
+# Static inventory and file scanning
 
 
 def build_security_inventory(scan_root: Path) -> dict[str, Any]:
@@ -2328,6 +2562,9 @@ def finding(
     }
 
 
+# AI security review
+
+
 def build_security_prompt(
     scan_root: Path, inventory_file: Path, result_file: Path
 ) -> str:
@@ -2552,6 +2789,9 @@ def extract_json_object(text: str) -> dict[str, Any] | None:
     return None
 
 
+# Security-result normalization
+
+
 def normalize_security_result(
     result: dict[str, Any], inventory: dict[str, Any]
 ) -> dict[str, Any]:
@@ -2640,6 +2880,9 @@ def risk_rank(value: str) -> int:
     return {"low": 1, "medium": 2, "high": 3, "critical": 4}.get(value, 2)
 
 
+# Security-result display
+
+
 def print_security_inputs(
     scan_root: Path,
     inventory: dict[str, Any],
@@ -2717,6 +2960,51 @@ def print_security_result(
             print(paint(f"  Recommendation: {item['recommendation']}", "dim"))
 
 
+def print_ci_security_result(
+    result: dict[str, Any], source: str, ai_skipped: bool = False
+) -> None:
+    safe = is_security_result_safe(result)
+    review_type = str(result.get("review_type", "static"))
+    risk = str(result.get("risk_level", "unknown"))
+    summary = str(result.get("summary") or "")
+    findings = normalize_findings(result.get("findings", []))
+
+    status = "PASS" if safe else "FAIL"
+    print(
+        f"skills-manager: {status} [{review_type}] risk={risk} source={source}",
+        file=sys.stderr,
+    )
+    if summary:
+        print(f"skills-manager: {summary}", file=sys.stderr)
+    if ai_skipped:
+        print(
+            "skills-manager: AI checks were requested but skipped because static checks "
+            "failed (use --force-run-ai-checks to run them anyway).",
+            file=sys.stderr,
+        )
+    for item in sorted(findings, key=lambda f: -risk_rank(f["severity"])):
+        print(
+            f"skills-manager: [{item['severity'].upper()}] {item['path']}: {item['issue']}",
+            file=sys.stderr,
+        )
+        if item["recommendation"]:
+            print(
+                f"skills-manager:   recommendation: {item['recommendation']}",
+                file=sys.stderr,
+            )
+
+    verdict = {
+        "tool": "skills-manager",
+        "review_type": review_type,
+        "safe": safe,
+        "risk_level": risk,
+        "findings": len(findings),
+        "ai_skipped": ai_skipped,
+        "source": source,
+    }
+    print(json.dumps(verdict, sort_keys=True))
+
+
 def print_install_summary(records: list[InstallRecord]) -> None:
     installed = [record for record in records if record.status == "installed"]
     skipped = [record for record in records if record.status == "skipped"]
@@ -2731,6 +3019,9 @@ def print_install_summary(records: list[InstallRecord]) -> None:
         )
 
     print(f"Done. Installed {len(installed)} skill(s); skipped {len(skipped)}.")
+
+
+# Process, path, and miscellaneous utilities
 
 
 def print_elapsed(label: str, started_at: float) -> None:
@@ -2749,13 +3040,13 @@ def format_elapsed(seconds: float) -> str:
 def resolve_security_result_path(value: str | None, fallback_dir: Path) -> tuple[Path, bool]:
     if value:
         return resolve_output_path(value), True
-    return fallback_dir / "skills-security-result.json", False
+    return fallback_dir / "skills-manager-security-result.json", False
 
 
 def format_security_result_location(path: Path, saved: bool) -> str:
     if saved:
         return str(path)
-    return "not saved (use --security-result-file PATH)"
+    return "not saved (use --output PATH)"
 
 
 def resolve_output_path(value: str) -> Path:
@@ -2795,7 +3086,7 @@ def write_json(path: Path, value: dict[str, Any]) -> None:
 def sha256_file(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+        for chunk in iter(lambda: handle.read(FILE_READ_CHUNK_BYTES), b""):
             digest.update(chunk)
     return digest.hexdigest()
 
@@ -2805,6 +3096,718 @@ def relative_string(path: Path, root: Path) -> str:
         return str(path.relative_to(root))
     except ValueError:
         return str(path)
+
+
+# Context-cost analysis
+
+
+def cost_finding(severity: str, code: str, message: str, path: str) -> Finding:
+    return {
+        "severity": severity,
+        "code": code,
+        "message": message,
+        "path": path,
+    }
+
+
+def new_report(root: Path, path: Path, name: str, has_skill_md: bool = True) -> SkillReport:
+    return {
+        "root": root.as_posix(),
+        "path": path.as_posix(),
+        "name": name,
+        "metadata": {},
+        "has_skill_md": has_skill_md,
+        "files": [],
+        "findings": [],
+    }
+
+
+def report_totals(report: SkillReport) -> dict[str, int]:
+    files = report["files"]
+    return {
+        "files": len(files),
+        "bytes": sum(item["bytes"] for item in files),
+        "characters": sum(item["characters"] for item in files),
+        "lines": sum(item["lines"] for item in files),
+        "words": sum(item["words"] for item in files),
+        "estimated_tokens": sum(item["estimated_tokens"] for item in files),
+    }
+
+
+def report_findings(report: SkillReport, severity: str) -> list[Finding]:
+    return [item for item in report["findings"] if item["severity"] == severity]
+
+
+def report_valid(report: SkillReport) -> bool:
+    return not report_findings(report, "error")
+
+
+def report_status(report: SkillReport) -> str:
+    if report_findings(report, "error"):
+        return "invalid"
+    if report_findings(report, "warning"):
+        return "warning"
+    return "ok"
+
+
+def report_json(report: SkillReport, include_files: bool = True) -> dict[str, Any]:
+    data = dict(report)
+    data["valid"] = report_valid(report)
+    data["status"] = report_status(report)
+    data["totals"] = report_totals(report)
+    data["load_estimates"] = load_estimates(report)
+    if not include_files:
+        data.pop("files", None)
+    return data
+
+
+def estimate_tokens(size: int) -> int:
+    return math.ceil(size / 4) if size else 0
+
+
+def line_count(text: str) -> int:
+    if not text:
+        return 0
+    return text.count("\n") + (0 if text.endswith("\n") else 1)
+
+
+def text_totals(text: str) -> dict[str, int]:
+    encoded = text.encode("utf-8")
+    return {
+        "files": 1 if text else 0,
+        "bytes": len(encoded),
+        "characters": len(text),
+        "lines": line_count(text),
+        "words": len(WORD_RE.findall(text)),
+        "estimated_tokens": estimate_tokens(len(text)),
+    }
+
+
+def metadata_context(report: SkillReport) -> str:
+    metadata = report["metadata"]
+    if not metadata:
+        return ""
+    lines = [
+        f"name: {metadata.get('name', report['name'])}",
+        f"description: {metadata.get('description', '')}",
+        f"path: {report['path']}",
+    ]
+    return "\n".join(lines) + "\n"
+
+
+def load_estimates(report: SkillReport) -> dict[str, dict[str, int]]:
+    skill_file = next(
+        (item for item in report["files"] if item["path"] == SKILL_FILENAME),
+        None,
+    )
+    skill_totals = {
+        key: skill_file[key] if skill_file else 0
+        for key in ("bytes", "characters", "lines", "words", "estimated_tokens")
+    }
+    skill_totals["files"] = 1 if skill_file else 0
+    return {
+        "metadata": text_totals(metadata_context(report)),
+        "skill": skill_totals,
+        "full": report_totals(report),
+    }
+
+
+def load_tokens(report: SkillReport, mode: str) -> int:
+    return load_estimates(report)[mode]["estimated_tokens"]
+
+
+def normalize_skill_name(value: str) -> str:
+    value = value.strip().split(":")[-1].lower()
+    value = value.replace("_", "-")
+    value = re.sub(r"\s+", "-", value)
+    value = NON_NAME_RE.sub("", value)
+    return re.sub(r"-+", "-", value).strip("-")
+
+
+def should_skip_dir(name: str, include_hidden: bool) -> bool:
+    return name in DEFAULT_SKIP_DIRS or (name.startswith(".") and not include_hidden)
+
+
+def relative_path(path: Path, base: Path) -> str:
+    try:
+        return path.relative_to(base).as_posix()
+    except ValueError:
+        return path.as_posix()
+
+
+def iter_files(base: Path, include_hidden: bool) -> Iterable[Path]:
+    for current, dirs, files in os.walk(base):
+        dirs[:] = sorted(
+            dirname
+            for dirname in dirs
+            if not should_skip_dir(dirname, include_hidden)
+        )
+        for filename in sorted(files):
+            if filename.startswith(".") and not include_hidden:
+                continue
+            path = Path(current) / filename
+            if path.is_file():
+                yield path
+
+
+def read_file_usage(path: Path, skill_dir: Path) -> tuple[FileUsage | None, Finding | None]:
+    rel_path = relative_path(path, skill_dir)
+    try:
+        data = path.read_bytes()
+    except OSError as exc:
+        return None, cost_finding(
+            "error",
+            "unreadable_file",
+            f"Could not read file: {exc}",
+            rel_path,
+        )
+
+    usage: FileUsage = {
+        "path": rel_path,
+        "extension": path.suffix.lower() or "[no extension]",
+        "bytes": len(data),
+        "characters": 0,
+        "lines": 0,
+        "words": 0,
+        "estimated_tokens": estimate_tokens(len(data)),
+        "binary": True,
+    }
+    try:
+        text = data.decode("utf-8")
+        binary = "\x00" in text[:4096]
+    except UnicodeDecodeError:
+        return usage, None
+
+    if not binary:
+        usage.update(
+            {
+                "characters": len(text),
+                "lines": line_count(text),
+                "words": len(WORD_RE.findall(text)),
+                "estimated_tokens": estimate_tokens(len(text)),
+                "binary": False,
+            }
+        )
+    return usage, None
+
+
+def read_utf8(path: Path, base: Path) -> tuple[str | None, Finding | None]:
+    try:
+        return path.read_text(encoding="utf-8"), None
+    except UnicodeDecodeError as exc:
+        return None, cost_finding(
+            "error",
+            "non_utf8_file",
+            f"Expected UTF-8 text but decode failed: {exc}",
+            relative_path(path, base),
+        )
+    except OSError as exc:
+        return None, cost_finding(
+            "error",
+            "unreadable_file",
+            f"Could not read file: {exc}",
+            relative_path(path, base),
+        )
+
+
+def parse_front_matter(text: str) -> tuple[dict[str, str], list[Finding], bool]:
+    findings: list[Finding] = []
+    if text.startswith("\ufeff"):
+        text = text.lstrip("\ufeff")
+
+    lines = text.splitlines()
+    if not lines or lines[0].strip() != "---":
+        return {}, findings, False
+
+    close_index: int | None = None
+    for index, line in enumerate(lines[1:], start=1):
+        if line.strip() == "---":
+            close_index = index
+            break
+
+    if close_index is None:
+        findings.append(
+            cost_finding(
+                "error",
+                "unclosed_front_matter",
+                "Front matter starts with --- but has no closing --- line.",
+                SKILL_FILENAME,
+            )
+        )
+        return {}, findings, True
+
+    metadata: dict[str, str] = {}
+    current_key: str | None = None
+    current_block: list[str] = []
+
+    def flush_block() -> None:
+        nonlocal current_key, current_block
+        if current_key and not metadata.get(current_key) and current_block:
+            metadata[current_key] = " ".join(current_block).strip()
+        current_key = None
+        current_block = []
+
+    for line in lines[1:close_index]:
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        if current_key and line.startswith((" ", "\t")):
+            block_line = stripped[1:].strip() if stripped.startswith("-") else stripped
+            current_block.append(block_line)
+            continue
+        if ":" not in stripped:
+            continue
+        flush_block()
+        key, value = stripped.split(":", 1)
+        key = key.strip()
+        value = value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
+            value = value[1:-1]
+        if key:
+            if value in {"", "|", ">"}:
+                metadata[key] = ""
+                current_key = key
+                current_block = []
+            else:
+                metadata[key] = value
+
+    flush_block()
+
+    return metadata, findings, True
+
+
+def clean_markdown_target(raw_target: str) -> str | None:
+    target = raw_target.strip()
+    if not target:
+        return None
+
+    if target.startswith("<") and ">" in target:
+        target = target[1 : target.index(">")]
+    else:
+        target = target.split()[0]
+
+    target = unquote(target.strip())
+    if not target or target.startswith("#"):
+        return None
+    if "{" in target or "}" in target:
+        return None
+    if SCHEME_RE.match(target):
+        return None
+    if target.startswith("/"):
+        return None
+
+    target = target.split("#", 1)[0].split("?", 1)[0]
+    return target or None
+
+
+def scan_broken_links(markdown_path: Path, skill_dir: Path) -> list[Finding]:
+    text, read_finding = read_utf8(markdown_path, skill_dir)
+    if read_finding:
+        return [read_finding]
+    assert text is not None
+
+    findings: list[Finding] = []
+    markdown_rel = relative_path(markdown_path, skill_dir)
+    for match in MARKDOWN_LINK_RE.finditer(text):
+        target = clean_markdown_target(match.group(1))
+        if target is None:
+            continue
+        candidate = (markdown_path.parent / target).resolve()
+        if not candidate.exists():
+            findings.append(
+                cost_finding(
+                    "error",
+                    "broken_relative_link",
+                    f"Relative link target does not exist: {target}",
+                    markdown_rel,
+                )
+            )
+    return findings
+
+
+def discover_skill_dirs(
+    root: Path,
+    include_hidden: bool,
+    include_nested: bool = False,
+) -> list[Path]:
+    if (root / SKILL_FILENAME).is_file() and not include_nested:
+        return [root]
+
+    skill_dirs: list[Path] = []
+    for current, dirs, files in os.walk(root):
+        dirs[:] = sorted(
+            dirname
+            for dirname in dirs
+            if not should_skip_dir(dirname, include_hidden)
+        )
+        if SKILL_FILENAME in files:
+            skill_dirs.append(Path(current))
+            if not include_nested:
+                dirs[:] = []
+    return sorted(skill_dirs)
+
+
+def find_missing_skill_candidates(root: Path, include_hidden: bool) -> list[Path]:
+    if (root / SKILL_FILENAME).is_file():
+        return []
+
+    candidates: list[Path] = []
+    try:
+        children = sorted(root.iterdir(), key=lambda item: item.name)
+    except OSError:
+        return candidates
+
+    for child in children:
+        if not child.is_dir():
+            continue
+        if should_skip_dir(child.name, include_hidden):
+            continue
+        if (child / SKILL_FILENAME).is_file():
+            continue
+        if discover_skill_dirs(child, include_hidden):
+            continue
+        candidates.append(child)
+    return candidates
+
+
+def collect_file_usage(report: SkillReport, skill_dir: Path, include_hidden: bool) -> None:
+    for file_path in iter_files(skill_dir, include_hidden):
+        usage, read_finding = read_file_usage(file_path, skill_dir)
+        if usage:
+            report["files"].append(usage)
+        if read_finding:
+            report["findings"].append(read_finding)
+
+
+def analyze_missing_candidate(root: Path, candidate: Path, include_hidden: bool) -> SkillReport:
+    report = new_report(root, candidate, candidate.name, has_skill_md=False)
+    collect_file_usage(report, candidate, include_hidden)
+    report["findings"].append(
+        cost_finding(
+            "error",
+            "missing_skill_md",
+            f"Candidate skill directory is missing {SKILL_FILENAME}.",
+            SKILL_FILENAME,
+        )
+    )
+    return report
+
+
+def analyze_skill(
+    root: Path,
+    skill_dir: Path,
+    include_hidden: bool,
+    max_skill_tokens: int,
+    max_file_tokens: int,
+) -> SkillReport:
+    report = new_report(root, skill_dir, skill_dir.name)
+    collect_file_usage(report, skill_dir, include_hidden)
+
+    skill_md = skill_dir / SKILL_FILENAME
+    text, read_finding = read_utf8(skill_md, skill_dir)
+    if read_finding:
+        report["findings"].append(read_finding)
+        return report
+    assert text is not None
+
+    if not text.strip():
+        report["findings"].append(
+            cost_finding(
+                "error",
+                "empty_skill_md",
+                f"{SKILL_FILENAME} is empty.",
+                SKILL_FILENAME,
+            )
+        )
+        return report
+
+    metadata, parse_findings, has_front_matter = parse_front_matter(text)
+    report["metadata"] = metadata
+    report["findings"].extend(parse_findings)
+
+    if not has_front_matter:
+        report["findings"].append(
+            cost_finding(
+                "error",
+                "missing_front_matter",
+                f"{SKILL_FILENAME} should start with YAML front matter.",
+                SKILL_FILENAME,
+            )
+        )
+
+    for key in ("name", "description"):
+        if not metadata.get(key, "").strip():
+            report["findings"].append(
+                cost_finding(
+                    "error",
+                    f"missing_{key}",
+                    f"Required front matter field is missing or empty: {key}.",
+                    SKILL_FILENAME,
+                )
+            )
+
+    if metadata.get("name"):
+        metadata_name = normalize_skill_name(metadata["name"])
+        folder_name = normalize_skill_name(skill_dir.name)
+        if metadata_name and folder_name and metadata_name != folder_name:
+            report["findings"].append(
+                cost_finding(
+                    "warning",
+                    "name_folder_mismatch",
+                    f"Metadata name '{metadata['name']}' does not match folder '{skill_dir.name}'.",
+                    SKILL_FILENAME,
+                )
+            )
+        report["name"] = metadata["name"]
+
+    for file_item in report["files"]:
+        if file_item["estimated_tokens"] > max_file_tokens:
+            report["findings"].append(
+                cost_finding(
+                    "warning",
+                    "large_file",
+                    f"File is estimated at {file_item['estimated_tokens']:,} tokens.",
+                    file_item["path"],
+                )
+            )
+
+    totals = report_totals(report)
+    if totals["estimated_tokens"] > max_skill_tokens:
+        report["findings"].append(
+            cost_finding(
+                "warning",
+                "large_skill",
+                f"Skill is estimated at {totals['estimated_tokens']:,} tokens.",
+                skill_dir.as_posix(),
+            )
+        )
+
+    for file_path in iter_files(skill_dir, include_hidden):
+        if file_path.suffix.lower() == ".md":
+            report["findings"].extend(scan_broken_links(file_path, skill_dir))
+
+    return report
+
+
+def analyze_roots(args: argparse.Namespace) -> tuple[list[SkillReport], list[Finding]]:
+    reports: list[SkillReport] = []
+    root_findings: list[Finding] = []
+
+    for raw_root in args.roots:
+        root = Path(raw_root).expanduser().resolve()
+        if not root.exists():
+            root_findings.append(
+                cost_finding("error", "missing_root", "Root path does not exist.", root.as_posix())
+            )
+            continue
+        if not root.is_dir():
+            root_findings.append(
+                cost_finding("error", "root_not_directory", "Root path is not a directory.", root.as_posix())
+            )
+            continue
+
+        for skill_dir in discover_skill_dirs(root, args.include_hidden):
+            reports.append(
+                analyze_skill(
+                    root=root,
+                    skill_dir=skill_dir,
+                    include_hidden=args.include_hidden,
+                    max_skill_tokens=args.max_skill_tokens,
+                    max_file_tokens=args.max_file_tokens,
+                )
+            )
+
+        for candidate in find_missing_skill_candidates(root, args.include_hidden):
+            reports.append(analyze_missing_candidate(root, candidate, args.include_hidden))
+
+    return sorted(reports, key=lambda item: load_tokens(item, args.load_mode), reverse=True), root_findings
+
+
+def summarize(reports: list[SkillReport], root_findings: list[Finding]) -> dict[str, Any]:
+    totals: Counter[str] = Counter()
+    load_totals = {mode: Counter() for mode in LOAD_MODE_LABELS}
+    extension_tokens: Counter[str] = Counter()
+    extension_files: Counter[str] = Counter()
+    all_files: list[dict[str, Any]] = []
+    errors = sum(1 for item in root_findings if item["severity"] == "error")
+    warnings = sum(1 for item in root_findings if item["severity"] == "warning")
+
+    for report in reports:
+        totals.update(report_totals(report))
+        for mode, mode_totals in load_estimates(report).items():
+            load_totals[mode].update(mode_totals)
+        errors += len(report_findings(report, "error"))
+        warnings += len(report_findings(report, "warning"))
+        for file_item in report["files"]:
+            extension_tokens[file_item["extension"]] += file_item["estimated_tokens"]
+            extension_files[file_item["extension"]] += 1
+            file_data = dict(file_item)
+            file_data["skill"] = report["name"]
+            file_data["skill_path"] = report["path"]
+            file_data["full_path"] = (Path(report["path"]) / file_item["path"]).as_posix()
+            all_files.append(file_data)
+
+    return {
+        "skills": len(reports),
+        "valid_skills": sum(1 for report in reports if report_valid(report)),
+        "invalid_skills": sum(1 for report in reports if not report_valid(report)),
+        "missing_skill_md_candidates": sum(1 for report in reports if not report["has_skill_md"]),
+        "files": totals["files"],
+        "bytes": totals["bytes"],
+        "characters": totals["characters"],
+        "lines": totals["lines"],
+        "words": totals["words"],
+        "estimated_tokens": totals["estimated_tokens"],
+        "errors": errors,
+        "warnings": warnings,
+        "load_estimates": {
+            mode: dict(mode_totals)
+            for mode, mode_totals in load_totals.items()
+        },
+        "extension_breakdown": [
+            {
+                "extension": extension,
+                "files": extension_files[extension],
+                "estimated_tokens": extension_tokens[extension],
+            }
+            for extension, _ in extension_tokens.most_common()
+        ],
+        "largest_files": sorted(
+            all_files,
+            key=lambda item: item["estimated_tokens"],
+            reverse=True,
+        ),
+    }
+
+
+def format_int(value: int) -> str:
+    return f"{value:,}"
+
+
+def cost_shorten_path(path: str, cwd: Path) -> str:
+    path_obj = Path(path)
+    try:
+        return path_obj.relative_to(cwd).as_posix()
+    except ValueError:
+        return path
+
+
+def print_text_report(
+    reports: list[SkillReport],
+    root_findings: list[Finding],
+    summary: dict[str, Any],
+    top: int,
+    load_mode: str,
+) -> None:
+    cwd = Path.cwd().resolve()
+    load_label = LOAD_MODE_LABELS[load_mode]
+    print("Skills Context Usage Report")
+    print("=" * 29)
+    print(f"Skills: {summary['skills']} total, {summary['valid_skills']} valid, {summary['invalid_skills']} invalid")
+    print(f"Files (full directory): {format_int(summary['files'])}")
+    print(f"Selected load mode: {load_label}")
+    print(
+        f"Estimated tokens ({load_label}): "
+        f"{format_int(summary['load_estimates'][load_mode]['estimated_tokens'])}"
+    )
+    print(
+        f"Characters ({load_label}): "
+        f"{format_int(summary['load_estimates'][load_mode]['characters'])}"
+    )
+    print(f"Findings: {summary['errors']} errors, {summary['warnings']} warnings")
+    print()
+
+    print("Load Mode Estimates")
+    print("-" * 19)
+    for mode, label in LOAD_MODE_LABELS.items():
+        tokens = summary["load_estimates"][mode]["estimated_tokens"]
+        print(f"{label.ljust(18)} {format_int(tokens).rjust(10)} tokens")
+    print()
+
+    if root_findings:
+        print("Root Findings")
+        print("-" * 13)
+        for finding in root_findings:
+            print(
+                f"{finding['severity'].upper()} {finding['path']} "
+                f"[{finding['code']}] {finding['message']}"
+            )
+        print()
+
+    if reports:
+        print(f"Largest Skills (top {min(top, len(reports))})")
+        print("-" * 28)
+        for report in reports[:top]:
+            totals = report_totals(report)
+            tokens = load_tokens(report, load_mode)
+            path = cost_shorten_path(report["path"], cwd)
+            print(
+                f"{format_int(tokens).rjust(10)} tokens  "
+                f"{str(totals['files']).rjust(4)} files  "
+                f"{report_status(report).ljust(7)}  {report['name']}  ({path})"
+            )
+        print()
+
+    invalid_or_warn = [report for report in reports if report["findings"]]
+    if invalid_or_warn:
+        print("Invalid Skills And Warnings")
+        print("-" * 27)
+        for report in invalid_or_warn:
+            print(
+                f"{report_status(report).upper()} {report['name']} "
+                f"({cost_shorten_path(report['path'], cwd)})"
+            )
+            for finding in report["findings"]:
+                print(
+                    f"  - {finding['severity'].upper()} [{finding['code']}] "
+                    f"{finding['path']}: {finding['message']}"
+                )
+        print()
+    else:
+        print("No invalid skills found.")
+        print()
+
+    extensions = summary["extension_breakdown"][:top]
+    if extensions:
+        print(f"Full Directory Extension Breakdown (top {len(extensions)})")
+        print("-" * 42)
+        for item in extensions:
+            print(
+                f"{item['extension'].ljust(16)} "
+                f"{format_int(item['estimated_tokens']).rjust(10)} tokens  "
+                f"{str(item['files']).rjust(4)} files"
+            )
+        print()
+
+    largest_files = summary["largest_files"][:top]
+    if largest_files:
+        print(f"Largest Files By Full Directory Footprint (top {len(largest_files)})")
+        print("-" * 54)
+        for item in largest_files:
+            binary = " binary" if item["binary"] else ""
+            path = cost_shorten_path(item["full_path"], cwd)
+            print(
+                f"{format_int(item['estimated_tokens']).rjust(10)} tokens  "
+                f"{path}{binary}"
+            )
+
+
+def build_json_report(
+    reports: list[SkillReport],
+    root_findings: list[Finding],
+    summary: dict[str, Any],
+    include_files: bool,
+    load_mode: str,
+) -> dict[str, Any]:
+    return {
+        "summary": {
+            **summary,
+            "selected_load_mode": load_mode,
+            "selected_load_mode_label": LOAD_MODE_LABELS[load_mode],
+        },
+        "root_findings": root_findings,
+        "skills": [report_json(report, include_files=include_files) for report in reports],
+    }
 
 
 if __name__ == "__main__":

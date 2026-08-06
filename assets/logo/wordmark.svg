@@ -1,5 +1,5 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="260" height="72" viewBox="0 0 260 72" role="img" aria-label="skills.py">
-  <text x="6" y="52" font-family="ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, monospace" font-size="48" font-weight="700" letter-spacing="-1.5">
-    <tspan fill="#E6EDF3">skills</tspan><tspan fill="#3FB950">.py</tspan>
+<svg xmlns="http://www.w3.org/2000/svg" width="410" height="72" viewBox="0 0 410 72" role="img" aria-label="Skills Manager">
+  <text x="6" y="52" font-family="ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, monospace" font-size="44" font-weight="700" letter-spacing="-1.5">
+    <tspan fill="#E6EDF3">Skills</tspan><tspan dx="0.35em" fill="#3FB950">Manager</tspan>
   </text>
 </svg>

@@ -1,4 +1,4 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="630" viewBox="0 0 1200 630" role="img" aria-label="skills.py">
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="630" viewBox="0 0 1200 630" role="img" aria-label="Skills Manager">
   <defs>
     <pattern id="dots" width="34" height="34" patternUnits="userSpaceOnUse">
       <circle cx="2" cy="2" r="2" fill="#3FB950" fill-opacity="0.05"/>
@@ -16,11 +16,11 @@
     </g>
   </g>
 
-  <text x="470" y="346" font-family="ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, monospace" font-size="120" font-weight="700" letter-spacing="-3">
-    <tspan fill="#E6EDF3">skills</tspan><tspan fill="#3FB950">.py</tspan>
+  <text x="470" y="346" font-family="ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, monospace" font-size="74" font-weight="700" letter-spacing="-2">
+    <tspan fill="#E6EDF3">Skills</tspan><tspan dx="0.35em" fill="#3FB950">Manager</tspan>
   </text>
   <text x="474" y="408" font-family="ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, monospace" font-size="28" fill="#8B949E">scan &#183; install &#183; update agent skills</text>
   <text x="474" y="452" font-family="ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, monospace" font-size="28" fill="#586069">claude &#183; cursor &#183; codex &#183; opencode</text>
 
-  <text x="1140" y="588" text-anchor="end" font-family="ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, monospace" font-size="26" fill="#586069">github.com/mazen160/skills.py</text>
+  <text x="1140" y="588" text-anchor="end" font-family="ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, monospace" font-size="26" fill="#586069">github.com/mazen160/skills-manager</text>
 </svg>
