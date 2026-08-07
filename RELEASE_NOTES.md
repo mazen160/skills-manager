@@ -13,7 +13,7 @@ skills scan https://github.com/owner/repo
 Add `--ai-checks` when you want Claude, Cursor, Codex, or OpenCode to review the same source in a restricted sandbox. The AI findings are merged into the report, but they cannot overrule a static block.
 
 ```sh
-skills scan https://github.com/owner/repo --ai-checks --agent codex
+skills scan https://github.com/owner/repo --ai-checks --ai-agent codex
 ```
 
 ## Manage the full skill lifecycle
@@ -27,14 +27,14 @@ skills update --apply
 skills uninstall my-skill
 ```
 
-Installing the package gives you four equivalent commands: `skill`, `skills`, `skill-manager`, and `skills-manager`.
+Installing the package gives you six equivalent commands: `skill`, `skills`, `skill-manager`, `skills-manager`, `agentic-skill-manager`, and `agentic-skills-manager`.
 
 ## Measure context cost
 
-`skills analyze cost` estimates how much context each skill consumes at catalog load, activation, and full-directory load. The same pass catches malformed front matter, broken relative links, missing metadata, invalid UTF-8, and oversized files.
+`skills analyze` estimates how much context each skill consumes at catalog load, activation, and full-directory load. With no source, it checks installed skills for every supported agent; it also accepts local folders, direct `SKILL.md` paths, and GitHub repository, tree, or blob URLs. The same pass catches malformed front matter, broken relative links, missing metadata, invalid UTF-8, and oversized files.
 
 ```sh
-skills analyze cost ~/.claude/skills ~/.codex/skills --load-mode full
+skills analyze ~/.claude/skills ~/.codex/skills --load-mode full
 ```
 
 ## Use it in CI

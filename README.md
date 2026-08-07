@@ -41,10 +41,10 @@ One file. No dependencies. Python standard library only.
 
 ```bash
 # Static security scan followed by an independent Claude review
-skills scan https://github.com/owner/repo --ai-checks --agent claude
+skills scan https://github.com/owner/repo --ai-checks --ai-agent claude
 
 # Ask Codex for a second opinion even when the static scan already blocked the source
-skills scan https://github.com/owner/repo --force-run-ai-checks --agent codex
+skills scan https://github.com/owner/repo --force-run-ai-checks --ai-agent codex
 ```
 
 AI review adds another layer; it never weakens the built-in security gate. A high or critical static finding still blocks installation, even when the AI review considers the source safe.
@@ -156,6 +156,9 @@ skills install https://github.com/owner/repo
 # Install into Cursor instead
 skills install https://github.com/owner/repo --agent cursor
 
+# Tighten the install gate: block medium, high, and critical findings
+skills install https://github.com/owner/repo --minimum-accepted-severity low
+
 # Install one skill from a subfolder of a monorepo
 skills install https://github.com/owner/repo/tree/main/skills/my-skill
 
@@ -172,14 +175,20 @@ skills list --verbose
 skills update
 skills update --apply
 
+# Use the same AI-review controls while checking or applying updates
+skills update --ai-checks --ai-agent codex --ai-agent-timeout-seconds 300
+
 # Remove a skill (dry-run first; -y to actually delete)
 skills uninstall my-skill
 skills uninstall my-skill -y
 
-# Analyze the context (token) cost of installed or local skills
-skills analyze cost ~/.claude/skills
-skills analyze cost ~/.claude/skills ~/.codex/skills --load-mode metadata
-skills analyze cost ./path/to/skill --json
+# Analyze all installed skills, or pass local and GitHub sources explicitly
+skills analyze
+skills analyze ~/.claude/skills ~/.codex/skills --load-mode metadata
+skills analyze ./path/to/skill --json
+skills analyze ./path/to/skill/SKILL.md
+skills analyze https://github.com/owner/repo
+skills analyze https://github.com/owner/repo/blob/main/path/to/SKILL.md
 ```
 
 ## CLI reference
@@ -191,7 +200,7 @@ skills analyze cost ./path/to/skill --json
 | `skills list` | List installed skills for one agent or across every supported agent. |
 | `skills update [SKILL]` | Re-fetch tracked sources, show changes, rescan them, and optionally apply approved updates. |
 | `skills uninstall SKILL` | Preview or confirm removal from one agent or all supported agents. |
-| `skills analyze cost ROOT...` | Estimate context usage and validate local or installed skill definitions. |
+| `skills analyze [SOURCE...]` | Estimate context usage and validate installed skills, local paths, or GitHub sources. |
 | `skills --banner` | Print the Skills Manager banner and exit. |
 | `skills --version` | Print the installed Skills Manager version. |
 
@@ -218,11 +227,11 @@ The static pass walks the whole source tree and focuses on deterministic supply-
 | Scanner evasion | long whitespace padding, more than 2,000 lines, more than 140,000 chars, files too large to fully scan |
 | Credential harvesting surface | executable code that reads environment variables |
 
-High and critical findings block the install. The verdict is printed by default; pass `--output PATH` when you want to save the normalized JSON report.
+By default, `install --minimum-accepted-severity medium` allows low and medium findings while high and critical findings block installation. Use `--minimum-accepted-severity low` for a stricter gate that also blocks medium findings, or `--minimum-accepted-severity high` to block only critical findings. The verdict is printed by default; pass `--output PATH` when you want to save the normalized JSON report.
 
-The static pass does not try to detect prompt injection by matching phrases like "ignore previous instructions" or "exfiltrate tokens." Those checks are too easy to bypass and too noisy to trust. The AI pass (`--ai-checks`) hands the inventory and source to the agent CLI you pick (`--agent claude|cursor|codex|opencode`). It runs in a restricted sandbox, reviews the source on its own, and merges its findings with the static ones. Normal output hides the large prompt and inventory; use `--show-ai-inputs` when you need to debug the exact AI-review inputs.
+The static pass does not try to detect prompt injection by matching phrases like "ignore previous instructions" or "exfiltrate tokens." Those checks are too easy to bypass and too noisy to trust. The AI pass (`--ai-checks`) hands the inventory and source to the agent CLI you pick (`--ai-agent claude|cursor|codex|opencode`). It runs in a restricted sandbox, reviews the source on its own, and merges its findings with the static ones. Set its execution limit with `--ai-agent-timeout-seconds`; normal output hides the large prompt and inventory, and `--show-ai-inputs` reveals them for debugging.
 
-The AI pass runs only after static checks pass, so a source that already failed static checks never reaches it. Add `--force-run-ai-checks` (on `scan` or `install`) to run the AI review anyway when you want its verdict for a blocked source. It implies `--ai-checks` and is for visibility only: it never overrides a static block, so `scan` still reports unsafe and `install` still refuses.
+The AI pass runs only after static checks pass, so a source that already failed static checks never reaches it. Add `--force-run-ai-checks` on `scan`, `install`, or `update` to run the AI review anyway when you want its verdict for a blocked source. It implies `--ai-checks` and is for visibility only: it never overrides the command's security gate.
 
 ## Use in CI
 
@@ -255,23 +264,35 @@ The stdout verdict looks like:
 
 ## Analyze context usage
 
-Skills cost context. A catalog of skills looks cheap, but activating a large `SKILL.md` or following its references into companion files can quietly burn tens of thousands of tokens. `skills analyze cost` makes those layers visible and flags invalid skills at the same time.
+Skills cost context. A catalog of skills looks cheap, but activating a large `SKILL.md` or following its references into companion files can quietly burn tens of thousands of tokens. `skills analyze` makes those layers visible and flags invalid skills at the same time.
 
 ```bash
-# Estimate context usage for a skills root
-skills analyze cost ~/.claude/skills
+# Estimate context usage across installed skills for all supported agents
+skills analyze
 
-# Analyze several roots at once
-skills analyze cost ~/.claude/skills ~/.codex/skills
+# Analyze one or more explicit local folders or SKILL.md files
+skills analyze ~/.claude/skills ~/.codex/skills
+skills analyze ./my-skill/SKILL.md
+
+# Clone and analyze a GitHub repository, tree, or SKILL.md blob URL
+skills analyze https://github.com/owner/repo
+skills analyze https://github.com/owner/repo/tree/main/skills/example
+skills analyze https://github.com/owner/repo/blob/main/skills/example/SKILL.md
 
 # Machine-readable output for scripts and CI
-skills analyze cost ~/.claude/skills --json
+skills analyze ~/.claude/skills --json
 
 # Exit non-zero when an invalid skill is found (useful in CI)
-skills analyze cost ~/.claude/skills --fail-on-invalid
+skills analyze ~/.claude/skills --fail-on-invalid
+
+# Exit non-zero when either configured token limit is exceeded
+skills analyze ~/.claude/skills --max-skill-tokens 50000 --max-file-tokens 10000 --fail-on-max-tokens
+
+# CI: JSON verdict on stdout, findings on stderr, non-zero when invalid
+skills analyze ~/.claude/skills --ci
 ```
 
-It treats every directory containing a `SKILL.md` as a skill and reports three load estimates, because not every skill is fully loaded at once:
+It treats every directory containing a `SKILL.md` as a skill and reports every skill's total size, file count, validation status, and three load estimates, because not every skill is fully loaded at once. JSON output also includes the complete per-file inventory with byte, character, line, word, and estimated-token counts.
 
 | Mode | What it measures |
 | --- | --- |
@@ -286,12 +307,12 @@ Beyond cost, the same pass validates skills and reports errors (missing/empty/no
 | Flag | Effect |
 | --- | --- |
 | `--json` | Print machine-readable JSON instead of the terminal report |
-| `--no-files` | Omit per-file records from JSON output |
+| `--ci` | Print a JSON verdict to stdout, findings to stderr, and exit non-zero when unsafe |
+| `--no-files` | Exclude individual file details from JSON output |
 | `--load-mode MODE` | Sort/headline by `metadata`, `skill`, or `full` |
-| `--include-hidden` | Include hidden files and directories (except known build/cache dirs) |
 | `--max-skill-tokens N` | Warn when a full skill directory exceeds N estimated tokens (default: 50000) |
 | `--max-file-tokens N` | Warn when a single file exceeds N estimated tokens (default: 10000) |
-| `--top N` | Number of largest skills, extensions, and files to show (default: 10) |
+| `--fail-on-max-tokens` | Exit 1 when either configured token limit is exceeded |
 | `--fail-on-invalid` | Exit 1 when invalid skills are found (root errors always exit 2) |
 
 ## Sources

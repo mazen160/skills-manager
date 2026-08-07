@@ -52,6 +52,105 @@ class AgentResolutionTests(unittest.TestCase):
         self.assertNotIn("codecs", help_text)
 
 
+class SecurityParityTests(unittest.TestCase):
+    """Parser-level checks for AI-review/severity parity across subcommands."""
+
+    def _parse(self, *argv: str) -> "skills.argparse.Namespace":
+        return skills.build_parser().parse_args(list(argv))
+
+    # install --agent is install target; --ai-agent is AI review
+    def test_install_agent_and_ai_agent_default_to_claude(self) -> None:
+        import tempfile, os
+        with tempfile.TemporaryDirectory() as tmp:
+            ns = self._parse("install", os.path.join(tmp, "fake"))
+        self.assertEqual(ns.agent, "claude")
+        self.assertEqual(ns.ai_agent, "claude")
+
+    def test_install_agent_and_ai_agent_are_independent(self) -> None:
+        import tempfile, os
+        with tempfile.TemporaryDirectory() as tmp:
+            ns = self._parse(
+                "install", os.path.join(tmp, "fake"),
+                "--agent", "cursor",
+                "--ai-agent", "claude",
+            )
+        self.assertEqual(ns.agent, "cursor")
+        self.assertEqual(ns.ai_agent, "claude")
+
+    def test_install_has_force_run_ai_checks(self) -> None:
+        import tempfile, os
+        with tempfile.TemporaryDirectory() as tmp:
+            ns = self._parse("install", os.path.join(tmp, "fake"), "--force-run-ai-checks")
+        self.assertTrue(ns.force_run_ai_checks)
+
+    def test_install_max_severity_default(self) -> None:
+        import tempfile, os
+        with tempfile.TemporaryDirectory() as tmp:
+            ns = self._parse("install", os.path.join(tmp, "fake"))
+        self.assertEqual(ns.max_severity, "medium")
+
+    # update parity
+    def test_update_has_force_run_ai_checks(self) -> None:
+        ns = self._parse("update", "--force-run-ai-checks")
+        self.assertTrue(ns.force_run_ai_checks)
+
+    def test_update_max_severity_default(self) -> None:
+        ns = self._parse("update")
+        self.assertEqual(ns.max_severity, "medium")
+
+    def test_update_max_severity_can_be_set(self) -> None:
+        ns = self._parse("update", "--minimum-accepted-severity", "high")
+        self.assertEqual(ns.max_severity, "high")
+
+    def test_update_ai_agent_default(self) -> None:
+        ns = self._parse("update")
+        self.assertEqual(ns.ai_agent, "claude")
+
+    def test_ai_review_options_are_shared_across_commands(self) -> None:
+        for command in ("scan", "install", "update"):
+            argv = [command]
+            if command in {"scan", "install"}:
+                argv.append("/tmp/fake-skill")
+            argv.extend(
+                [
+                    "--ai-agent",
+                    "codex",
+                    "--ai-agent-timeout-seconds",
+                    "45",
+                    "--ai-checks",
+                    "--force-run-ai-checks",
+                ]
+            )
+            with self.subTest(command=command):
+                ns = self._parse(*argv)
+                self.assertEqual(ns.ai_agent, "codex")
+                self.assertEqual(ns.ai_agent_timeout_seconds, 45)
+                self.assertTrue(ns.ai_checks)
+                self.assertTrue(ns.force_run_ai_checks)
+
+    def test_ai_review_help_is_consistent_across_commands(self) -> None:
+        parser = skills.build_parser()
+        subparsers = next(
+            action
+            for action in parser._actions
+            if isinstance(action, skills.argparse._SubParsersAction)
+        )
+        for command in ("scan", "install", "update"):
+            help_text = subparsers.choices[command].format_help()
+            with self.subTest(command=command):
+                self.assertIn("--ai-agent-timeout-seconds", help_text)
+                self.assertIn("Timeout for the AI review agent", help_text)
+                self.assertIn("Run an AI review after static checks pass", help_text)
+                self.assertNotIn("--security-timeout-seconds", help_text)
+
+    # scan uses --ai-agent, not --agent
+    def test_scan_has_ai_agent_not_bare_agent(self) -> None:
+        import tempfile, os
+        with tempfile.TemporaryDirectory() as tmp:
+            ns = self._parse("scan", os.path.join(tmp, "fake"), "--ai-agent", "cursor")
+        self.assertEqual(ns.ai_agent, "cursor")
+
+
 class PositiveIntTests(unittest.TestCase):
     def test_accepts_positive(self) -> None:
         self.assertEqual(skills.positive_int("10"), 10)
@@ -195,9 +294,30 @@ class TextScanTests(unittest.TestCase):
         )
 
     def test_env_access_in_executable(self) -> None:
-        text = "import os\nprint(os.environ)\n"
-        findings = skills.scan_text_patterns(text, "a.py", "a.py", ".py")
-        self.assertTrue(
+        cases = (
+            ("import os\nprint(os.environ)\n", "a.py", ".py"),
+            ("import os\ntoken = os.getenv('TOKEN')\n", "a.py", ".py"),
+            ("const token = process.env.TOKEN;\n", "a.js", ".js"),
+            ("#!/bin/sh\nprintenv TOKEN\n", "a.sh", ".sh"),
+        )
+        for text, filename, suffix in cases:
+            with self.subTest(filename=filename, text=text):
+                findings = skills.scan_text_patterns(text, filename, filename, suffix)
+                self.assertTrue(
+                    any("Environment variable access" in item["issue"] for item in findings)
+                )
+
+    def test_env_shebang_and_documentation_are_not_env_access(self) -> None:
+        text = (
+            "#!/usr/bin/env python3\n"
+            '"""Validation only; os.environ is not accessed."""\n'
+            "# process.env is also only mentioned in a comment.\n"
+            "print('package is valid')\n"
+        )
+        findings = skills.scan_text_patterns(
+            text, "scripts/validate-package.py", "validate-package.py", ".py"
+        )
+        self.assertFalse(
             any("Environment variable access" in item["issue"] for item in findings)
         )
 
@@ -248,6 +368,37 @@ class SecurityVerdictTests(unittest.TestCase):
         }
         self.assertFalse(skills.is_security_result_safe(result))
 
+    def test_findings_respect_max_severity(self) -> None:
+        low_and_medium = [{"severity": "low"}, {"severity": "medium"}]
+        self.assertFalse(
+            skills.findings_exceed_max_severity(low_and_medium, "medium")
+        )
+        self.assertTrue(
+            skills.findings_exceed_max_severity([{"severity": "medium"}], "low")
+        )
+        self.assertTrue(
+            skills.findings_exceed_max_severity([{"severity": "high"}], "medium")
+        )
+        self.assertFalse(
+            skills.findings_exceed_max_severity([{"severity": "high"}], "high")
+        )
+        self.assertTrue(
+            skills.findings_exceed_max_severity([{"severity": "critical"}], "high")
+        )
+
+    def test_security_result_can_allow_default_blocking_level(self) -> None:
+        result = {
+            "safe": False,
+            "risk_level": "high",
+            "findings": [{"severity": "high", "path": "x", "issue": "review"}],
+        }
+        self.assertTrue(
+            skills.security_result_exceeds_max_severity(result, "medium")
+        )
+        self.assertFalse(
+            skills.security_result_exceeds_max_severity(result, "high")
+        )
+
 
 class InventoryTests(unittest.TestCase):
     def test_clean_skill_is_safe(self) -> None:
@@ -283,6 +434,45 @@ class InventoryTests(unittest.TestCase):
 
 
 class CostAnalyzerTests(unittest.TestCase):
+    def test_analyze_parser_accepts_direct_sources(self) -> None:
+        args = skills.build_parser().parse_args(
+            ["analyze", "/tmp/one", "/tmp/two", "--json"]
+        )
+        self.assertEqual(args.sources, ["/tmp/one", "/tmp/two"])
+        self.assertTrue(args.json)
+        self.assertIs(args.handler, skills.run_analyze_command)
+
+    def test_analyze_parser_accepts_no_sources(self) -> None:
+        args = skills.build_parser().parse_args(["analyze"])
+        self.assertEqual(args.sources, [])
+        self.assertIs(args.handler, skills.run_analyze_command)
+
+    def test_analyze_parser_accepts_repository_selection_options(self) -> None:
+        args = skills.build_parser().parse_args(
+            [
+                "analyze",
+                "https://github.com/owner/repo",
+                "--branch",
+                "main",
+                "--path",
+                "skills/demo",
+            ]
+        )
+        self.assertEqual(args.sources, ["https://github.com/owner/repo"])
+        self.assertEqual(args.branch, "main")
+        self.assertEqual(args.path, "skills/demo")
+
+    def test_analyze_parser_accepts_fail_on_max_tokens(self) -> None:
+        args = skills.build_parser().parse_args(
+            ["analyze", "/tmp/skills", "--fail-on-max-tokens"]
+        )
+        self.assertTrue(args.fail_on_max_tokens)
+
+    def test_format_bytes(self) -> None:
+        self.assertEqual(skills.format_bytes(0), "0 B")
+        self.assertEqual(skills.format_bytes(1023), "1023 B")
+        self.assertEqual(skills.format_bytes(1024), "1.0 KiB")
+
     def test_estimate_tokens(self) -> None:
         self.assertEqual(skills.estimate_tokens(0), 0)
         self.assertEqual(skills.estimate_tokens(4), 1)

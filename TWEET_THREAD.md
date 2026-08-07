@@ -34,7 +34,7 @@ Skills Manager handles the whole lifecycle: scan, install, list, update, uninsta
 
 ## 5/6 - context cost
 
-Skills consume context too. skills analyze cost estimates catalog, activation, and full-directory usage, then flags malformed front matter, broken links, missing metadata, and oversized files.
+Skills consume context too. skills analyze estimates catalog, activation, and full-directory usage, then flags malformed front matter, broken links, missing metadata, and oversized files.
 
 [character count: 192]
 

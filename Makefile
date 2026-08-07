@@ -17,7 +17,7 @@ help:
 		'  make test          Run the standard-library test suite' \
 		'  make build         Build a clean source archive and wheel' \
 		'  make check         Build and validate both distributions' \
-		'  make smoke         Install the wheel and exercise all four commands' \
+		'  make smoke         Install the wheel and exercise all six commands' \
 		'  make release       Run the complete release check without uploading' \
 		'  make publish-test  Upload verified artifacts to TestPyPI' \
 		'  make publish CONFIRM_VERSION=$(VERSION)' \
@@ -38,6 +38,10 @@ test: verify-version
 
 clean:
 	rm -rf build dist skills_manager.egg-info
+	find . -type d -name __pycache__ -exec rm -rf {} +
+	find . -type f -name '*.py[cod]' -delete
+	find . -type d -name '*.egg-info' -exec rm -rf {} +
+	rm -rf .mypy_cache .ruff_cache .pytest_cache
 
 build: clean test
 	$(PYTHON) -m build
@@ -55,6 +59,8 @@ smoke: check
 	$(SMOKE_VENV)/bin/skills --version
 	$(SMOKE_VENV)/bin/skill-manager --version
 	$(SMOKE_VENV)/bin/skills-manager --version
+	$(SMOKE_VENV)/bin/agentic-skill-manager --version
+	$(SMOKE_VENV)/bin/agentic-skills-manager --version
 	$(SMOKE_VENV)/bin/skills --banner >/dev/null
 
 release: smoke

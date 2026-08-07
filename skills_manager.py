@@ -17,6 +17,7 @@ import sys
 import tempfile
 import textwrap
 import time
+import tokenize
 import zipfile
 from collections import Counter
 from contextlib import contextmanager, redirect_stdout
@@ -156,7 +157,7 @@ SENSITIVE_DOTFILES = {
 }
 PERSISTENCE_DIR_NAMES = {".husky", "hooks", "git-hooks"}
 
-# Cost analyzer (`skills analyze cost`) constants.
+# Analyzer constants.
 SKILL_FILENAME = "SKILL.md"
 LOAD_MODE_LABELS = {
     "metadata": "metadata catalog",
@@ -251,7 +252,7 @@ class SkillInstallError(Exception):
     """User-facing installation failure."""
 
 
-# Cost analyzer (`skills analyze cost`) report shapes.
+# Analyzer report shapes.
 Finding = dict[str, Any]
 FileUsage = dict[str, Any]
 SkillReport = dict[str, Any]
@@ -303,16 +304,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     add_source_arguments(scan_parser)
     add_security_arguments(scan_parser)
-    scan_parser.add_argument(
-        "--ai-checks",
-        action="store_true",
-        help="Run second-round AI checks after static checks pass",
-    )
-    scan_parser.add_argument(
-        "--force-run-ai-checks",
-        action="store_true",
-        help="Run AI checks even when static checks fail (implies --ai-checks; does not override the static block)",
-    )
+    add_ai_review_arguments(scan_parser)
     scan_parser.add_argument(
         "--ci",
         action="store_true",
@@ -326,7 +318,7 @@ def build_parser() -> argparse.ArgumentParser:
         description="List installed skills for supported local agents.",
     )
     list_parser.add_argument(
-        "--agent", metavar="AGENT", help="Filter by supported agent"
+        "--agent", metavar="AGENT", help="Filter by supported agent (claude, cursor, codex, opencode)"
     )
     list_parser.add_argument(
         "--verbose",
@@ -341,29 +333,37 @@ def build_parser() -> argparse.ArgumentParser:
         description="Install skills after static checks, optionally followed by AI checks.",
     )
     add_source_arguments(install_parser)
-    add_security_arguments(
-        install_parser,
-        agent_help="Install target and AI review agent (default: claude)",
+    install_parser.add_argument(
+        "--agent",
+        metavar="AGENT",
+        default="claude",
+        help="Install target agent (default: claude; also: cursor, codex, opencode)",
     )
+    add_security_arguments(install_parser)
     install_parser.add_argument(
         "--recursive",
         action="store_true",
         help="Install every directory under the selected root that contains SKILL.md",
     )
+    add_ai_review_arguments(install_parser)
     install_parser.add_argument(
-        "--ai-checks",
+        "--force-install",
         action="store_true",
-        help="Run second-round AI checks after static checks pass",
+        dest="force",
+        help="Force install: overwrite already-installed skills instead of skipping them",
     )
     install_parser.add_argument(
-        "--force-run-ai-checks",
+        "--unsafe-install",
         action="store_true",
-        help="Run AI checks even when static checks fail (implies --ai-checks); installation stays blocked by static findings",
+        dest="unsafe",
+        help="Unsafe install: proceed even when security checks find blocking issues (findings are shown but do not block)",
     )
     install_parser.add_argument(
-        "--force",
-        action="store_true",
-        help="Overwrite already-installed skills instead of skipping them",
+        "--minimum-accepted-severity",
+        dest="max_severity",
+        choices=("low", "medium", "high"),
+        default="medium",
+        help="Minimum severity that is accepted; findings above this level block installation (default: medium)",
     )
     install_parser.set_defaults(handler=run_install_command)
 
@@ -376,7 +376,7 @@ def build_parser() -> argparse.ArgumentParser:
         "skill", nargs="?", help="Optional installed skill name to update"
     )
     update_parser.add_argument(
-        "--agent", metavar="AGENT", help="Update skills for one agent"
+        "--agent", metavar="AGENT", help="Update skills for one agent (claude, cursor, codex, opencode)"
     )
     update_parser.add_argument(
         "--all-agents",
@@ -388,32 +388,14 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Apply available updates after static and optional AI checks pass",
     )
+    add_security_arguments(update_parser)
+    add_ai_review_arguments(update_parser)
     update_parser.add_argument(
-        "--ai-checks",
-        action="store_true",
-        help="Run second-round AI checks before reporting or applying updates",
-    )
-    update_parser.add_argument(
-        "--ai-agent",
-        metavar="AGENT",
-        default="claude",
-        help="AI review agent for update checks (default: claude)",
-    )
-    update_parser.add_argument(
-        "--security-timeout-seconds",
-        type=positive_int,
-        default=300,
-        help="Timeout for AI checks (default: 300)",
-    )
-    update_parser.add_argument(
-        "--output",
-        metavar="PATH",
-        help="Write the last normalized security result JSON to PATH",
-    )
-    update_parser.add_argument(
-        "--show-ai-inputs",
-        action="store_true",
-        help="Print the full AI prompt and deterministic inventory when --ai-checks is used",
+        "--minimum-accepted-severity",
+        dest="max_severity",
+        choices=("low", "medium", "high"),
+        default="medium",
+        help="Minimum severity that is accepted; findings above this level block the update (default: medium)",
     )
     update_parser.set_defaults(handler=run_update_command)
 
@@ -426,7 +408,7 @@ def build_parser() -> argparse.ArgumentParser:
     uninstall_parser.add_argument(
         "--agent",
         metavar="AGENT",
-        help="Uninstall from one agent; defaults to all supported agents",
+        help="Uninstall from one agent (claude, cursor, codex, opencode); defaults to all",
     )
     uninstall_parser.add_argument(
         "--all-agents",
@@ -443,27 +425,34 @@ def build_parser() -> argparse.ArgumentParser:
 
     analyze_parser = subparsers.add_parser(
         "analyze",
-        help="Analyze installed or local skills",
-        description="Run analysis subcommands over local skill folders.",
+        help="Estimate context usage and validate skills",
+        description=(
+            "Estimate context usage and validate installed, local, or GitHub skills. "
+            "Without SOURCE, analyze installed skills for all supported agents."
+        ),
     )
-    analyze_subparsers = analyze_parser.add_subparsers(
-        dest="analyze_command", required=True
-    )
-    cost_parser = analyze_subparsers.add_parser(
-        "cost",
-        help="Estimate skill context usage and find invalid skills",
-        description="Analyze agent skill folders for context usage and invalid skill definitions.",
-    )
-    add_analyze_cost_arguments(cost_parser)
-    cost_parser.set_defaults(handler=run_analyze_cost_command)
+    add_analyze_arguments(analyze_parser)
+    analyze_parser.set_defaults(handler=run_analyze_command)
     return parser
 
 
-def add_analyze_cost_arguments(parser: argparse.ArgumentParser) -> None:
+def add_analyze_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
-        "roots",
-        nargs="+",
-        help="One or more skill roots, or a single skill directory containing SKILL.md.",
+        "sources",
+        nargs="*",
+        metavar="SOURCE",
+        help=(
+            "Local folder, SKILL.md path, or GitHub repository/tree/blob URL; "
+            "defaults to installed skills for all supported agents"
+        ),
+    )
+    parser.add_argument(
+        "--path",
+        help="Folder inside a single repository or local source",
+    )
+    parser.add_argument(
+        "--branch",
+        help="Branch or tag for a single GitHub source",
     )
     parser.add_argument(
         "--json",
@@ -471,9 +460,17 @@ def add_analyze_cost_arguments(parser: argparse.ArgumentParser) -> None:
         help="Print machine-readable JSON instead of a terminal report.",
     )
     parser.add_argument(
+        "--ci",
+        action="store_true",
+        help=(
+            "CI mode: suppress decorative output, print findings to stderr and "
+            "a machine-readable verdict (JSON) to stdout, exit non-zero when unsafe"
+        ),
+    )
+    parser.add_argument(
         "--no-files",
         action="store_true",
-        help="Omit per-file records from JSON output.",
+        help="Exclude individual file details from JSON output.",
     )
     parser.add_argument(
         "--load-mode",
@@ -483,11 +480,6 @@ def add_analyze_cost_arguments(parser: argparse.ArgumentParser) -> None:
             "Choose which context estimate sorts and headlines the text report: "
             "metadata catalog, activated SKILL.md, or full directory. Default: full."
         ),
-    )
-    parser.add_argument(
-        "--include-hidden",
-        action="store_true",
-        help="Include hidden files and directories except known build/cache directories.",
     )
     parser.add_argument(
         "--max-skill-tokens",
@@ -502,22 +494,27 @@ def add_analyze_cost_arguments(parser: argparse.ArgumentParser) -> None:
         help="Warn when a single file exceeds this estimated token count. Default: 10000.",
     )
     parser.add_argument(
-        "--top",
-        type=positive_int,
-        default=10,
-        help="Number of largest skills, extensions, and files to show in text output. Default: 10.",
+        "--fail-on-max-tokens",
+        action="store_true",
+        help=(
+            "Exit with code 1 when a skill or file exceeds its configured "
+            "token limit."
+        ),
     )
     parser.add_argument(
         "--fail-on-invalid",
         action="store_true",
-        help="Exit with code 1 when invalid skills or root errors are found.",
+        help="Exit with code 1 when invalid skills or source errors are found.",
     )
 
 
 def add_source_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "source",
-        help="GitHub repository URL, GitHub /tree/<branch>/<path> URL, or local folder path",
+        help=(
+            "GitHub repository, /tree/<branch>/<path>, or "
+            "/blob/<branch>/<path>/SKILL.md URL; or a local folder"
+        ),
     )
     parser.add_argument(
         "--path", help="Folder path inside the repository or local source"
@@ -525,21 +522,19 @@ def add_source_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--branch", help="Branch or tag to clone; GitHub sources only")
 
 
-def add_security_arguments(
-    parser: argparse.ArgumentParser,
-    agent_help: str = "AI review agent (default: claude)",
-) -> None:
+def add_security_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
-        "--agent",
+        "--ai-agent",
         metavar="AGENT",
         default="claude",
-        help=agent_help,
+        dest="ai_agent",
+        help="AI review agent (default: claude; also: cursor, codex, opencode)",
     )
     parser.add_argument(
-        "--security-timeout-seconds",
+        "--ai-agent-timeout-seconds",
         type=positive_int,
         default=300,
-        help="Timeout for AI checks (default: 300)",
+        help="Timeout for the AI review agent (default: 300 seconds)",
     )
     parser.add_argument(
         "--output",
@@ -550,6 +545,22 @@ def add_security_arguments(
         "--show-ai-inputs",
         action="store_true",
         help="Print the full AI prompt and deterministic inventory when --ai-checks is used",
+    )
+
+
+def add_ai_review_arguments(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--ai-checks",
+        action="store_true",
+        help="Run an AI review after static checks pass",
+    )
+    parser.add_argument(
+        "--force-run-ai-checks",
+        action="store_true",
+        help=(
+            "Run the AI review even when static checks block the source "
+            "(implies --ai-checks; never overrides the security gate)"
+        ),
     )
 
 
@@ -583,7 +594,7 @@ def run_scan_command(args: argparse.Namespace) -> int:
         return run_scan_ci_command(args)
 
     started_at = time.monotonic()
-    ai_agent = canonical_agent(args.agent)
+    ai_agent = canonical_agent(args.ai_agent)
 
     with prepared_source(args.source, args.path, args.branch) as prepared:
         install_root, security_root = prepared.install_root, prepared.security_root
@@ -628,7 +639,7 @@ def run_scan_command(args: argparse.Namespace) -> int:
                 artifact_root=security_root,
                 output_result_file=result_file,
                 agent=ai_agent,
-                timeout_seconds=args.security_timeout_seconds,
+                timeout_seconds=args.ai_agent_timeout_seconds,
                 inventory=inventory,
                 show_inputs=args.show_ai_inputs,
             )
@@ -645,7 +656,7 @@ def run_scan_command(args: argparse.Namespace) -> int:
 
 
 def run_scan_ci_command(args: argparse.Namespace) -> int:
-    ai_agent = canonical_agent(args.agent)
+    ai_agent = canonical_agent(args.ai_agent)
     ai_enabled = args.ai_checks or args.force_run_ai_checks
 
     # CI mode prints only the verdict and findings, so swallow the human-facing
@@ -668,7 +679,7 @@ def run_scan_ci_command(args: argparse.Namespace) -> int:
                     artifact_root=security_root,
                     output_result_file=result_file,
                     agent=ai_agent,
-                    timeout_seconds=args.security_timeout_seconds,
+                    timeout_seconds=args.ai_agent_timeout_seconds,
                     inventory=inventory,
                     show_inputs=False,
                 )
@@ -682,6 +693,7 @@ def run_scan_ci_command(args: argparse.Namespace) -> int:
 def run_install_command(args: argparse.Namespace) -> int:
     started_at = time.monotonic()
     install_agent = canonical_agent(args.agent)
+    ai_review_agent = canonical_agent(args.ai_agent)
 
     with prepared_source(args.source, args.path, args.branch) as prepared:
         install_root, security_root = prepared.install_root, prepared.security_root
@@ -709,27 +721,40 @@ def run_install_command(args: argparse.Namespace) -> int:
             output_result_file=result_file,
         )
         print_security_result(static_result, result_file, result_saved)
-        static_safe = is_security_result_safe(static_result)
+        static_blocked = security_result_exceeds_max_severity(
+            static_result, args.max_severity
+        )
         ai_enabled = args.ai_checks or args.force_run_ai_checks
 
-        if not static_safe and not args.force_run_ai_checks:
-            if ai_enabled:
+        if static_blocked and not args.force_run_ai_checks:
+            if args.unsafe:
                 print(
                     paint(
-                        "Skipping AI checks: static security checks already blocked installation. "
-                        "Re-run with --force-run-ai-checks to run them anyway.",
-                        "yellow",
+                        "WARNING: --unsafe-install is set. Security checks found findings "
+                        f"above --minimum-accepted-severity {args.max_severity}, but "
+                        "installation will proceed. You accept all risk.",
+                        "red",
                     )
                 )
-            elapsed = format_elapsed(time.monotonic() - started_at)
-            raise SkillInstallError(
-                "Static security checks blocked installation. "
-                f"Result: {format_security_result_location(result_file, result_saved)} "
-                f"(elapsed {elapsed})"
-            )
+            else:
+                if ai_enabled:
+                    print(
+                        paint(
+                            "Skipping AI checks: static security checks already blocked installation. "
+                            "Re-run with --force-run-ai-checks to run them anyway.",
+                            "yellow",
+                        )
+                    )
+                elapsed = format_elapsed(time.monotonic() - started_at)
+                raise SkillInstallError(
+                    "Static security checks found findings above "
+                    f"--minimum-accepted-severity {args.max_severity} and blocked installation. "
+                    f"Result: {format_security_result_location(result_file, result_saved)} "
+                    f"(elapsed {elapsed})"
+                )
 
         if ai_enabled:
-            if not static_safe:
+            if static_blocked:
                 print(
                     paint(
                         "Static security checks blocked installation, but --force-run-ai-checks "
@@ -741,25 +766,37 @@ def run_install_command(args: argparse.Namespace) -> int:
                 scan_root=install_root,
                 artifact_root=security_root,
                 output_result_file=result_file,
-                agent=install_agent,
-                timeout_seconds=args.security_timeout_seconds,
+                agent=ai_review_agent,
+                timeout_seconds=args.ai_agent_timeout_seconds,
                 inventory=inventory,
                 show_inputs=args.show_ai_inputs,
             )
             print_security_result(ai_result, result_file, result_saved)
-            if not is_security_result_safe(ai_result):
-                elapsed = format_elapsed(time.monotonic() - started_at)
-                raise SkillInstallError(
-                    "AI checks blocked installation. "
-                    f"Result: {format_security_result_location(result_file, result_saved)} "
-                    f"(elapsed {elapsed})"
-                )
+            if security_result_exceeds_max_severity(ai_result, args.max_severity):
+                if args.unsafe:
+                    print(
+                        paint(
+                            "WARNING: --unsafe-install is set. AI checks found findings "
+                            f"above --minimum-accepted-severity {args.max_severity}, but "
+                            "installation will proceed. You accept all risk.",
+                            "red",
+                        )
+                    )
+                else:
+                    elapsed = format_elapsed(time.monotonic() - started_at)
+                    raise SkillInstallError(
+                        "AI checks found findings above "
+                        f"--minimum-accepted-severity {args.max_severity} and blocked installation. "
+                        f"Result: {format_security_result_location(result_file, result_saved)} "
+                        f"(elapsed {elapsed})"
+                    )
 
-        if not static_safe:
+        if static_blocked and not args.unsafe:
             elapsed = format_elapsed(time.monotonic() - started_at)
             raise SkillInstallError(
-                "Static security checks blocked installation; --force-run-ai-checks runs the "
-                "AI review but does not override static findings. "
+                "Static security checks found findings above "
+                f"--minimum-accepted-severity {args.max_severity}; --force-run-ai-checks runs the "
+                "AI review but does not override the install severity policy. "
                 f"Result: {format_security_result_location(result_file, result_saved)} "
                 f"(elapsed {elapsed})"
             )
@@ -807,8 +844,10 @@ def run_update_command(args: argparse.Namespace) -> int:
                     skill=skill,
                     apply_update=args.apply,
                     ai_checks=args.ai_checks,
+                    force_run_ai_checks=args.force_run_ai_checks,
                     ai_agent=ai_agent,
-                    timeout_seconds=args.security_timeout_seconds,
+                    max_severity=args.max_severity,
+                    timeout_seconds=args.ai_agent_timeout_seconds,
                     result_file=result_file,
                     result_saved=result_saved,
                     show_ai_inputs=args.show_ai_inputs,
@@ -854,11 +893,14 @@ def run_uninstall_command(args: argparse.Namespace) -> int:
     return 0
 
 
-def run_analyze_cost_command(args: argparse.Namespace) -> int:
-    reports, root_findings = analyze_roots(args)
+def run_analyze_command(args: argparse.Namespace) -> int:
+    reports, root_findings = analyze_sources(args)
     summary = summarize(reports, root_findings)
+    exit_code = analyze_exit_code(args, reports, root_findings, summary)
 
-    if args.json:
+    if args.ci:
+        print_analyze_ci_result(args, reports, root_findings, summary, exit_code)
+    elif args.json:
         print(
             json.dumps(
                 build_json_report(
@@ -873,13 +915,79 @@ def run_analyze_cost_command(args: argparse.Namespace) -> int:
             )
         )
     else:
-        print_text_report(reports, root_findings, summary, args.top, args.load_mode)
+        print_text_report(reports, root_findings, summary, args.load_mode)
 
+    return exit_code
+
+
+def analyze_token_limit_exceeded(reports: list[SkillReport]) -> bool:
+    return any(
+        finding["code"] in {"large_skill", "large_file"}
+        for report in reports
+        for finding in report["findings"]
+    )
+
+
+def analyze_exit_code(
+    args: argparse.Namespace,
+    reports: list[SkillReport],
+    root_findings: list[Finding],
+    summary: dict[str, Any],
+) -> int:
     if root_findings:
         return 2
-    if args.fail_on_invalid and summary["invalid_skills"]:
+    if args.fail_on_max_tokens and analyze_token_limit_exceeded(reports):
+        return 1
+    if (args.ci or args.fail_on_invalid) and summary["invalid_skills"]:
         return 1
     return 0
+
+
+def print_analyze_ci_result(
+    args: argparse.Namespace,
+    reports: list[SkillReport],
+    root_findings: list[Finding],
+    summary: dict[str, Any],
+    exit_code: int,
+) -> None:
+    safe = exit_code == 0
+    status = "PASS" if safe else "FAIL"
+    print(
+        f"skills-manager: {status} [analyze] skills={summary['skills']} "
+        f"invalid={summary['invalid_skills']}",
+        file=sys.stderr,
+    )
+    findings = list(root_findings)
+    findings.extend(
+        finding for report in reports for finding in report["findings"]
+    )
+    for finding in findings:
+        print(
+            f"skills-manager: [{finding['severity'].upper()}] {finding['path']} "
+            f"[{finding['code']}] {finding['message']}",
+            file=sys.stderr,
+        )
+
+    verdict = {
+        "tool": "skills-manager",
+        "command": "analyze",
+        "safe": safe,
+        "sources": args.sources or ["installed"],
+        "skills": summary["skills"],
+        "valid_skills": summary["valid_skills"],
+        "invalid_skills": summary["invalid_skills"],
+        "files": summary["files"],
+        "bytes": summary["bytes"],
+        "estimated_tokens": summary["load_estimates"][args.load_mode][
+            "estimated_tokens"
+        ],
+        "load_mode": args.load_mode,
+        "errors": summary["errors"],
+        "warnings": summary["warnings"],
+        "findings": len(findings),
+        "token_limit_exceeded": analyze_token_limit_exceeded(reports),
+    }
+    print(json.dumps(verdict, sort_keys=True))
 
 
 # Source resolution and fetching
@@ -887,7 +995,10 @@ def run_analyze_cost_command(args: argparse.Namespace) -> int:
 
 @contextmanager
 def prepared_source(
-    raw_source: str, path_arg: str | None, branch_arg: str | None
+    raw_source: str,
+    path_arg: str | None,
+    branch_arg: str | None,
+    announce: bool = True,
 ) -> Iterator[PreparedSource]:
     source = parse_source(raw_source, path_arg, branch_arg)
     with tempfile.TemporaryDirectory(prefix="skills-") as temp_name:
@@ -897,14 +1008,16 @@ def prepared_source(
         security_root.mkdir()
 
         if source.kind == "github":
-            print(paint(f"Cloning {source.repo_url}", "dim"))
+            if announce:
+                print(paint(f"Cloning {source.repo_url}", "dim"))
             clone_source(source, clone_root)
             remove_root_git_metadata(clone_root)
             source_root = clone_root
         else:
             if source.local_path is None:
                 raise SkillInstallError("Local source path was not resolved")
-            print(paint(f"Using local folder {source.local_path}", "dim"))
+            if announce:
+                print(paint(f"Using local folder {source.local_path}", "dim"))
             shutil.copytree(source.local_path, clone_root, symlinks=True)
             remove_root_git_metadata(clone_root)
             source_root = clone_root
@@ -931,10 +1044,7 @@ def parse_source(
     raw_source: str, path_arg: str | None, branch_arg: str | None
 ) -> InstallSource:
     parsed = urlparse(raw_source)
-    if raw_source.startswith("git@github.com:") or parsed.netloc.lower() in {
-        "github.com",
-        "www.github.com",
-    }:
+    if is_github_source(raw_source):
         return parse_github_source(raw_source, path_arg, branch_arg)
 
     if parsed.scheme and parsed.scheme != "file":
@@ -960,6 +1070,14 @@ def parse_source(
         branch=None,
         sparse_path=normalize_repo_path(path_arg),
     )
+
+
+def is_github_source(raw_source: str) -> bool:
+    parsed = urlparse(raw_source)
+    return raw_source.startswith("git@github.com:") or parsed.netloc.lower() in {
+        "github.com",
+        "www.github.com",
+    }
 
 
 def parse_github_source(
@@ -1273,7 +1391,9 @@ def check_or_apply_update(
     skill: InstalledSkill,
     apply_update: bool,
     ai_checks: bool,
+    force_run_ai_checks: bool,
     ai_agent: str,
+    max_severity: str,
     timeout_seconds: int,
     result_file: Path,
     result_saved: bool,
@@ -1331,16 +1451,26 @@ def check_or_apply_update(
             candidate_root, result_file
         )
         print_security_result(static_result, result_file, result_saved)
-        if not is_security_result_safe(static_result):
+        static_blocked = security_result_exceeds_max_severity(static_result, max_severity)
+        if static_blocked and not force_run_ai_checks:
             return UpdateRecord(
                 skill.agent,
                 skill.path.name,
                 skill.path,
                 "blocked",
-                "static checks failed",
+                f"static checks exceeded --minimum-accepted-severity {max_severity}",
             )
 
-        if ai_checks:
+        ai_enabled = ai_checks or force_run_ai_checks
+        if ai_enabled:
+            if static_blocked:
+                print(
+                    paint(
+                        "Static security checks blocked this update, but --force-run-ai-checks "
+                        "is set; running AI checks anyway (for visibility only).",
+                        "yellow",
+                    )
+                )
             ai_result = run_ai_security_checks(
                 scan_root=candidate_root,
                 artifact_root=prepared.security_root,
@@ -1351,14 +1481,23 @@ def check_or_apply_update(
                 show_inputs=show_ai_inputs,
             )
             print_security_result(ai_result, result_file, result_saved)
-            if not is_security_result_safe(ai_result):
+            if security_result_exceeds_max_severity(ai_result, max_severity):
                 return UpdateRecord(
                     skill.agent,
                     skill.path.name,
                     skill.path,
                     "blocked",
-                    "AI checks failed",
+                    f"AI checks exceeded --minimum-accepted-severity {max_severity}",
                 )
+
+        if static_blocked:
+            return UpdateRecord(
+                skill.agent,
+                skill.path.name,
+                skill.path,
+                "blocked",
+                f"static checks exceeded --minimum-accepted-severity {max_severity}",
+            )
 
         if directory_fingerprint(skill.path) == directory_fingerprint(candidate_root):
             return UpdateRecord(
@@ -1761,7 +1900,7 @@ def run_ai_security_checks(
     show_inputs: bool = False,
 ) -> dict[str, Any]:
     if timeout_seconds <= 0:
-        raise SkillInstallError("--security-timeout-seconds must be greater than zero")
+        raise SkillInstallError("--ai-agent-timeout-seconds must be greater than zero")
 
     if inventory is None:
         inventory = build_security_inventory(scan_root)
@@ -2389,18 +2528,55 @@ def scan_text_patterns(
                 "Review install-time scripts; they execute automatically in many package managers.",
             )
         )
-    if suffix in EXECUTABLE_TEXT_SUFFIXES and re.search(
-        r"(?i)\b(env|printenv|process\.env|os\.environ)\b", text
-    ):
+    if suffix in EXECUTABLE_TEXT_SUFFIXES and has_environment_access(text, suffix):
         findings.append(
             finding(
                 "high",
                 rel,
-                "Environment variable access found in executable code.",
-                "Check for credential harvesting or exfiltration paths.",
+                "Environment variable access API or command found in executable code.",
+                "Review which variables are accessed and whether their values can reach network requests, subprocesses, or logs.",
             )
         )
     return findings
+
+
+def has_environment_access(text: str, suffix: str) -> bool:
+    code = executable_code_text(text, suffix)
+    patterns = (
+        r"\bos\s*\.\s*(?:environ|getenv)\b",
+        r"\bprocess\s*\.\s*env\b",
+        r"\b(?:Deno|Bun)\s*\.\s*env\b",
+        r"\bSystem\s*\.\s*getenv\s*\(",
+        r"\bENV\s*(?:\[|\.\s*fetch\s*\()",
+        r"\bgetenv\s*\(",
+        r"^\s*(?:command\s+)?printenv(?:\s|$)",
+        r"^\s*(?:command\s+)?env\s*(?:$|[|>])",
+    )
+    return any(re.search(pattern, code, re.IGNORECASE | re.MULTILINE) for pattern in patterns)
+
+
+def executable_code_text(text: str, suffix: str) -> str:
+    lines = text.splitlines()
+    if lines and lines[0].lstrip().startswith("#!"):
+        lines = lines[1:]
+
+    code = "\n".join(
+        line
+        for line in lines
+        if not line.lstrip().startswith(("#", "//", "/*", "*", "<!--"))
+    )
+    if suffix != ".py":
+        return code
+
+    try:
+        tokens = tokenize.generate_tokens(io.StringIO(code).readline)
+        return tokenize.untokenize(
+            token
+            for token in tokens
+            if token.type not in {tokenize.COMMENT, tokenize.STRING}
+        )
+    except (IndentationError, tokenize.TokenError):
+        return code
 
 
 def scan_zip_like_archive(path: Path, scan_root: Path) -> list[dict[str, str]]:
@@ -2976,7 +3152,29 @@ def deduplicate_findings(findings: list[dict[str, str]]) -> list[dict[str, str]]
 
 
 def has_blocking_findings(findings: list[dict[str, str]]) -> bool:
-    return any(item["severity"] in {"high", "critical"} for item in findings)
+    return findings_exceed_max_severity(findings, "medium")
+
+
+def findings_exceed_max_severity(
+    findings: list[dict[str, str]], max_severity: str
+) -> bool:
+    maximum_rank = risk_rank(max_severity)
+    return any(
+        risk_rank(str(item.get("severity") or "medium")) > maximum_rank
+        for item in findings
+    )
+
+
+def security_result_exceeds_max_severity(
+    result: dict[str, Any], max_severity: str
+) -> bool:
+    findings = normalize_findings(result.get("findings", []))
+    if findings_exceed_max_severity(findings, max_severity):
+        return True
+    if result.get("safe") is False:
+        risk_level = str(result.get("risk_level") or risk_level_from_findings(findings))
+        return risk_rank(risk_level) > risk_rank(max_severity)
+    return False
 
 
 def is_security_result_safe(result: dict[str, Any]) -> bool:
@@ -3624,6 +3822,7 @@ def analyze_skill(
     include_hidden: bool,
     max_skill_tokens: int,
     max_file_tokens: int,
+    folder_name: str | None = None,
 ) -> SkillReport:
     report = new_report(root, skill_dir, skill_dir.name)
     collect_file_usage(report, skill_dir, include_hidden)
@@ -3673,13 +3872,14 @@ def analyze_skill(
 
     if metadata.get("name"):
         metadata_name = normalize_skill_name(metadata["name"])
-        folder_name = normalize_skill_name(skill_dir.name)
-        if metadata_name and folder_name and metadata_name != folder_name:
+        compared_folder = folder_name or skill_dir.name
+        normalized_folder = normalize_skill_name(compared_folder)
+        if metadata_name and normalized_folder and metadata_name != normalized_folder:
             report["findings"].append(
                 cost_finding(
                     "warning",
                     "name_folder_mismatch",
-                    f"Metadata name '{metadata['name']}' does not match folder '{skill_dir.name}'.",
+                    f"Metadata name '{metadata['name']}' does not match folder '{compared_folder}'.",
                     SKILL_FILENAME,
                 )
             )
@@ -3714,36 +3914,166 @@ def analyze_skill(
     return report
 
 
-def analyze_roots(args: argparse.Namespace) -> tuple[list[SkillReport], list[Finding]]:
+def default_analyze_sources() -> list[str]:
+    sources = [
+        skills_dir
+        for agent in SUPPORTED_AGENTS
+        for skills_dir in agent_skill_dirs(agent)
+        if skills_dir.is_dir()
+    ]
+    return [path.as_posix() for path in deduplicate_paths(sources)]
+
+
+def resolve_analyze_local_root(
+    raw_source: str,
+    path_arg: str | None,
+    branch_arg: str | None,
+) -> Path:
+    parsed = urlparse(raw_source)
+    if parsed.scheme and parsed.scheme != "file":
+        raise SkillInstallError("Only github.com URLs and local paths are supported")
+    if branch_arg:
+        raise SkillInstallError("--branch can only be used with GitHub sources")
+
+    root = Path(
+        unquote(parsed.path) if parsed.scheme == "file" else raw_source
+    ).expanduser()
+    if root.is_file():
+        if path_arg:
+            raise SkillInstallError("--path cannot be used with a direct file path")
+        if root.name.lower() != SKILL_FILENAME.lower():
+            raise SkillInstallError(f"Local analysis file must be {SKILL_FILENAME}: {root}")
+        return root.parent.resolve()
+
+    normalized_path = normalize_repo_path(path_arg)
+    if normalized_path and root.is_dir():
+        return resolve_install_root(root.resolve(), normalized_path)
+    return root.resolve()
+
+
+def remote_analyze_label(raw_source: str) -> str:
+    parsed = urlparse(raw_source)
+    path = parsed.path.rstrip("/")
+    if "/blob/" in path and path.rsplit("/", 1)[-1].lower() == SKILL_FILENAME.lower():
+        path = path.rsplit("/", 1)[0]
+    if parsed.scheme:
+        return parsed._replace(path=path, query="", fragment="").geturl()
+    return raw_source.rstrip("/")
+
+
+def join_analyze_path(base: str, relative: str) -> str:
+    if relative in {"", "."}:
+        return base
+    if is_github_source(base):
+        return f"{base.rstrip('/')}/{relative}"
+    return (Path(base) / relative).as_posix()
+
+
+def rebase_remote_reports(
+    reports: list[SkillReport],
+    root: Path,
+    raw_source: str,
+) -> None:
+    label = remote_analyze_label(raw_source)
+    for report in reports:
+        report_path = Path(report["path"])
+        try:
+            relative = report_path.relative_to(root).as_posix()
+        except ValueError:
+            relative = report_path.name
+        report["root"] = label
+        report["path"] = join_analyze_path(label, relative)
+        for finding in report["findings"]:
+            finding_path = Path(finding["path"])
+            if not finding_path.is_absolute():
+                continue
+            try:
+                finding_relative = finding_path.relative_to(root).as_posix()
+            except ValueError:
+                continue
+            finding["path"] = join_analyze_path(label, finding_relative)
+
+
+def analyze_root(
+    root: Path,
+    args: argparse.Namespace,
+    root_name: str | None = None,
+) -> tuple[list[SkillReport], list[Finding]]:
     reports: list[SkillReport] = []
     root_findings: list[Finding] = []
 
-    for raw_root in args.roots:
-        root = Path(raw_root).expanduser().resolve()
-        if not root.exists():
-            root_findings.append(
-                cost_finding("error", "missing_root", "Root path does not exist.", root.as_posix())
-            )
-            continue
-        if not root.is_dir():
-            root_findings.append(
-                cost_finding("error", "root_not_directory", "Root path is not a directory.", root.as_posix())
-            )
-            continue
+    if not root.exists():
+        root_findings.append(
+            cost_finding("error", "missing_root", "Root path does not exist.", root.as_posix())
+        )
+        return reports, root_findings
+    if not root.is_dir():
+        root_findings.append(
+            cost_finding("error", "root_not_directory", "Root path is not a directory.", root.as_posix())
+        )
+        return reports, root_findings
 
-        for skill_dir in discover_skill_dirs(root, args.include_hidden):
-            reports.append(
-                analyze_skill(
-                    root=root,
-                    skill_dir=skill_dir,
-                    include_hidden=args.include_hidden,
-                    max_skill_tokens=args.max_skill_tokens,
-                    max_file_tokens=args.max_file_tokens,
+    for skill_dir in discover_skill_dirs(root, include_hidden=False):
+        reports.append(
+            analyze_skill(
+                root=root,
+                skill_dir=skill_dir,
+                include_hidden=False,
+                max_skill_tokens=args.max_skill_tokens,
+                max_file_tokens=args.max_file_tokens,
+                folder_name=root_name if skill_dir == root else None,
+            )
+        )
+
+    for candidate in find_missing_skill_candidates(root, include_hidden=False):
+        reports.append(analyze_missing_candidate(root, candidate, include_hidden=False))
+
+    return reports, root_findings
+
+
+def analyze_source_root_name(source: InstallSource) -> str:
+    if source.sparse_path:
+        return Path(source.sparse_path).name
+    if source.repo_url:
+        return Path(urlparse(source.repo_url).path).name.removesuffix(".git")
+    if source.local_path:
+        return source.local_path.name
+    return "source"
+
+
+def analyze_sources(args: argparse.Namespace) -> tuple[list[SkillReport], list[Finding]]:
+    if (args.path or args.branch) and len(args.sources) != 1:
+        raise SkillInstallError(
+            "--path and --branch require exactly one explicit analysis source"
+        )
+
+    sources = list(args.sources) or default_analyze_sources()
+    reports: list[SkillReport] = []
+    root_findings: list[Finding] = []
+    for raw_source in sources:
+        if is_github_source(raw_source):
+            with prepared_source(
+                raw_source,
+                args.path,
+                args.branch,
+                announce=not (args.json or args.ci),
+            ) as prepared:
+                source_reports, source_findings = analyze_root(
+                    prepared.install_root,
+                    args,
+                    root_name=analyze_source_root_name(prepared.source),
                 )
-            )
+                rebase_remote_reports(
+                    source_reports,
+                    prepared.install_root,
+                    raw_source,
+                )
+        else:
+            root = resolve_analyze_local_root(raw_source, args.path, args.branch)
+            source_reports, source_findings = analyze_root(root, args)
 
-        for candidate in find_missing_skill_candidates(root, args.include_hidden):
-            reports.append(analyze_missing_candidate(root, candidate, args.include_hidden))
+        reports.extend(source_reports)
+        root_findings.extend(source_findings)
 
     return sorted(reports, key=lambda item: load_tokens(item, args.load_mode), reverse=True), root_findings
 
@@ -3769,7 +4099,9 @@ def summarize(reports: list[SkillReport], root_findings: list[Finding]) -> dict[
             file_data = dict(file_item)
             file_data["skill"] = report["name"]
             file_data["skill_path"] = report["path"]
-            file_data["full_path"] = (Path(report["path"]) / file_item["path"]).as_posix()
+            file_data["full_path"] = join_analyze_path(
+                report["path"], file_item["path"]
+            )
             all_files.append(file_data)
 
     return {
@@ -3809,6 +4141,18 @@ def format_int(value: int) -> str:
     return f"{value:,}"
 
 
+def format_bytes(value: int) -> str:
+    amount = float(value)
+    units = ("B", "KiB", "MiB", "GiB", "TiB")
+    for unit in units:
+        if abs(amount) < 1024 or unit == units[-1]:
+            if unit == "B":
+                return f"{int(amount)} {unit}"
+            return f"{amount:.1f} {unit}"
+        amount /= 1024
+    return f"{value} B"
+
+
 def cost_shorten_path(path: str, cwd: Path) -> str:
     path_obj = Path(path)
     try:
@@ -3821,7 +4165,6 @@ def print_text_report(
     reports: list[SkillReport],
     root_findings: list[Finding],
     summary: dict[str, Any],
-    top: int,
     load_mode: str,
 ) -> None:
     cwd = Path.cwd().resolve()
@@ -3830,6 +4173,7 @@ def print_text_report(
     print("=" * 29)
     print(f"Skills: {summary['skills']} total, {summary['valid_skills']} valid, {summary['invalid_skills']} invalid")
     print(f"Files (full directory): {format_int(summary['files'])}")
+    print(f"Size (full directory): {format_bytes(summary['bytes'])}")
     print(f"Selected load mode: {load_label}")
     print(
         f"Estimated tokens ({load_label}): "
@@ -3860,14 +4204,15 @@ def print_text_report(
         print()
 
     if reports:
-        print(f"Largest Skills (top {min(top, len(reports))})")
-        print("-" * 28)
-        for report in reports[:top]:
+        print("Skills")
+        print("-" * 6)
+        for report in reports:
             totals = report_totals(report)
             tokens = load_tokens(report, load_mode)
             path = cost_shorten_path(report["path"], cwd)
             print(
                 f"{format_int(tokens).rjust(10)} tokens  "
+                f"{format_bytes(totals['bytes']).rjust(10)}  "
                 f"{str(totals['files']).rjust(4)} files  "
                 f"{report_status(report).ljust(7)}  {report['name']}  ({path})"
             )
@@ -3892,10 +4237,11 @@ def print_text_report(
         print("No invalid skills found.")
         print()
 
-    extensions = summary["extension_breakdown"][:top]
+    extensions = summary["extension_breakdown"]
     if extensions:
-        print(f"Full Directory Extension Breakdown (top {len(extensions)})")
-        print("-" * 42)
+        heading = "Full Directory Extension Breakdown"
+        print(heading)
+        print("-" * len(heading))
         for item in extensions:
             print(
                 f"{item['extension'].ljust(16)} "
@@ -3904,15 +4250,17 @@ def print_text_report(
             )
         print()
 
-    largest_files = summary["largest_files"][:top]
+    largest_files = summary["largest_files"]
     if largest_files:
-        print(f"Largest Files By Full Directory Footprint (top {len(largest_files)})")
-        print("-" * 54)
+        heading = "Files By Full Directory Footprint"
+        print(heading)
+        print("-" * len(heading))
         for item in largest_files:
             binary = " binary" if item["binary"] else ""
             path = cost_shorten_path(item["full_path"], cwd)
             print(
                 f"{format_int(item['estimated_tokens']).rjust(10)} tokens  "
+                f"{format_bytes(item['bytes']).rjust(10)}  "
                 f"{path}{binary}"
             )
 

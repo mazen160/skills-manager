@@ -16,12 +16,14 @@ from __future__ import annotations
 import io
 import json
 import os
+import re
 import sys
 import tempfile
 import textwrap
 import unittest
-from contextlib import redirect_stderr, redirect_stdout
+from contextlib import contextmanager, redirect_stderr, redirect_stdout
 from pathlib import Path
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -250,6 +252,31 @@ class InstallLifecycleTests(unittest.TestCase):
         _, stdout, _ = _run_main("list")
         self.assertNotIn("bad-skill", stdout)
 
+    def test_install_default_max_severity_allows_medium(self) -> None:
+        source = self._skill_source("medium-skill", **{"validate.py": "print('ok')\n"})
+        (source / "validate.py").chmod(0o755)
+        rc, _, stderr = _run_main("install", str(source))
+        self.assertEqual(rc, 0, stderr)
+
+    def test_install_max_severity_low_blocks_medium(self) -> None:
+        source = self._skill_source("strict-skill", **{"validate.py": "print('ok')\n"})
+        (source / "validate.py").chmod(0o755)
+        rc, _, stderr = _run_main(
+            "install", str(source), "--minimum-accepted-severity", "low"
+        )
+        self.assertNotEqual(rc, 0)
+        self.assertIn("--minimum-accepted-severity low", stderr)
+
+    def test_install_max_severity_high_allows_high(self) -> None:
+        source = self._skill_source(
+            "permissive-skill",
+            **{"read_env.py": "import os\nprint(os.environ)\n"},
+        )
+        rc, _, stderr = _run_main(
+            "install", str(source), "--minimum-accepted-severity", "high"
+        )
+        self.assertEqual(rc, 0, stderr)
+
     def test_install_creates_metadata_file(self) -> None:
         source = self._skill_source("meta-skill")
         _run_main("install", str(source))
@@ -276,7 +303,7 @@ class InstallLifecycleTests(unittest.TestCase):
         (source / "SKILL.md").write_text(
             _skill_md("overwrite-skill", "Updated description."), encoding="utf-8"
         )
-        rc, _, _ = _run_main("install", str(source), "--force")
+        rc, _, _ = _run_main("install", str(source), "--force-install")
         self.assertEqual(rc, 0)
         skill_dir = skills.agent_skill_dir("claude") / "overwrite-skill"
         content = (skill_dir / "SKILL.md").read_text()
@@ -345,11 +372,189 @@ class UpdateLifecycleTests(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
+# Analyze command
+# ---------------------------------------------------------------------------
+
+class AnalyzeCommandTests(unittest.TestCase):
+    def test_analyze_direct_root_returns_json_report(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            skill_dir = _make_skill_dir(
+                Path(tmp),
+                "context-skill",
+                extra_files={"reference.md": "Reference material.\n"},
+            )
+            rc, stdout, stderr = _run_main("analyze", str(skill_dir), "--json")
+
+        self.assertEqual(rc, 0, stderr)
+        report = json.loads(stdout)
+        self.assertEqual(report["summary"]["skills"], 1)
+        self.assertEqual(report["skills"][0]["name"], "context-skill")
+        self.assertEqual(report["skills"][0]["totals"]["files"], 2)
+        self.assertGreater(report["skills"][0]["totals"]["bytes"], 0)
+        self.assertEqual(len(report["skills"][0]["files"]), 2)
+
+    def test_analyze_text_reports_size_and_files_for_every_skill(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _make_skill_dir(root, "first-skill")
+            _make_skill_dir(root, "second-skill")
+            rc, stdout, stderr = _run_main("analyze", str(root))
+
+        self.assertEqual(rc, 0, stderr)
+        self.assertIn("Size (full directory):", stdout)
+        self.assertIn("files", stdout)
+        self.assertIn("first-skill", stdout)
+        self.assertIn("second-skill", stdout)
+
+    def test_analyze_token_limit_is_warning_by_default(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            skill_dir = _make_skill_dir(Path(tmp), "large-skill")
+            rc, stdout, stderr = _run_main(
+                "analyze", str(skill_dir), "--max-skill-tokens", "1"
+            )
+
+        self.assertEqual(rc, 0, stderr)
+        self.assertIn("large_skill", stdout)
+
+    def test_analyze_can_fail_on_skill_token_limit(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            skill_dir = _make_skill_dir(Path(tmp), "large-skill")
+            rc, _, _ = _run_main(
+                "analyze",
+                str(skill_dir),
+                "--max-skill-tokens",
+                "1",
+                "--fail-on-max-tokens",
+            )
+
+        self.assertEqual(rc, 1)
+
+    def test_analyze_can_fail_on_file_token_limit(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            skill_dir = _make_skill_dir(Path(tmp), "large-file-skill")
+            rc, _, _ = _run_main(
+                "analyze",
+                str(skill_dir),
+                "--max-file-tokens",
+                "1",
+                "--fail-on-max-tokens",
+            )
+
+        self.assertEqual(rc, 1)
+
+    def test_analyze_ci_prints_verdict_to_stdout(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            skill_dir = _make_skill_dir(Path(tmp), "ci-skill")
+            rc, stdout, stderr = _run_main("analyze", str(skill_dir), "--ci")
+
+        self.assertEqual(rc, 0, stderr)
+        verdict = json.loads(stdout)
+        self.assertTrue(verdict["safe"])
+        self.assertEqual(verdict["command"], "analyze")
+        self.assertEqual(verdict["skills"], 1)
+        self.assertIn("PASS [analyze]", stderr)
+        self.assertNotIn("Skills Context Usage Report", stdout)
+
+    def test_analyze_ci_fails_for_invalid_skill(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            skill_dir = Path(tmp) / "invalid-skill"
+            skill_dir.mkdir()
+            (skill_dir / "SKILL.md").write_text("No front matter.\n", encoding="utf-8")
+            rc, stdout, stderr = _run_main("analyze", str(skill_dir), "--ci")
+
+        self.assertEqual(rc, 1)
+        verdict = json.loads(stdout)
+        self.assertFalse(verdict["safe"])
+        self.assertEqual(verdict["invalid_skills"], 1)
+        self.assertIn("FAIL [analyze]", stderr)
+        self.assertIn("missing_front_matter", stderr)
+
+    def test_analyze_ci_honors_fail_on_max_tokens(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            skill_dir = _make_skill_dir(Path(tmp), "large-ci-skill")
+            rc, stdout, stderr = _run_main(
+                "analyze",
+                str(skill_dir),
+                "--ci",
+                "--max-skill-tokens",
+                "1",
+                "--fail-on-max-tokens",
+            )
+
+        self.assertEqual(rc, 1)
+        verdict = json.loads(stdout)
+        self.assertTrue(verdict["token_limit_exceeded"])
+        self.assertIn("large_skill", stderr)
+
+    def test_analyze_without_sources_uses_installed_skill_directories(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            installed_root = Path(tmp) / "installed"
+            _make_skill_dir(installed_root, "installed-skill")
+            with patch.object(skills, "agent_skill_dirs", return_value=[installed_root]):
+                rc, stdout, stderr = _run_main("analyze", "--json")
+
+        self.assertEqual(rc, 0, stderr)
+        report = json.loads(stdout)
+        self.assertEqual(report["summary"]["skills"], 1)
+        self.assertEqual(report["skills"][0]["name"], "installed-skill")
+
+    def test_analyze_accepts_direct_skill_file(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            skill_dir = _make_skill_dir(Path(tmp), "file-skill")
+            rc, stdout, stderr = _run_main("analyze", str(skill_dir / "SKILL.md"), "--json")
+
+        self.assertEqual(rc, 0, stderr)
+        report = json.loads(stdout)
+        self.assertEqual(report["skills"][0]["name"], "file-skill")
+
+    def test_analyze_accepts_github_blob_url_without_temp_paths(self) -> None:
+        url = "https://github.com/owner/repo/blob/main/demo/SKILL.md?plain=1"
+        with tempfile.TemporaryDirectory() as tmp:
+            root = _make_skill_dir(Path(tmp), "demo")
+            source = skills.InstallSource(
+                "github", url, "https://github.com/owner/repo.git", None, "main", "demo"
+            )
+            prepared = skills.PreparedSource(source, root, Path(tmp) / "security")
+
+            @contextmanager
+            def fake_prepared_source(*_args: object, **_kwargs: object):
+                yield prepared
+
+            with patch.object(skills, "prepared_source", fake_prepared_source):
+                rc, stdout, stderr = _run_main("analyze", url, "--json")
+
+        self.assertEqual(rc, 0, stderr)
+        report = json.loads(stdout)
+        skill = report["skills"][0]
+        self.assertEqual(skill["findings"], [])
+        self.assertEqual(
+            skill["path"],
+            "https://github.com/owner/repo/blob/main/demo",
+        )
+        self.assertEqual(
+            report["summary"]["largest_files"][0]["full_path"],
+            "https://github.com/owner/repo/blob/main/demo/SKILL.md",
+        )
+        self.assertNotIn(tmp, stdout)
+
+    def test_analyze_help_has_no_nested_cost_command(self) -> None:
+        rc, stdout, stderr = _run_main("analyze", "--help")
+        self.assertEqual(rc, 0, stderr)
+        self.assertIn("[SOURCE ...]", stdout)
+        self.assertNotIn("{cost}", stdout)
+        self.assertNotIn("--top", stdout)
+        self.assertNotIn("--include-hidden", stdout)
+        self.assertIn("--ci", stdout)
+        self.assertIn("Exclude individual file details from JSON output.", stdout)
+        self.assertNotIn("analyze_command", stderr)
+
+
+# ---------------------------------------------------------------------------
 # Command alias tests
 # ---------------------------------------------------------------------------
 
 class CommandAliasTests(unittest.TestCase):
-    """Verify all four entry-point aliases are declared in pyproject.toml."""
+    """Verify all six entry-point aliases are declared in pyproject.toml."""
 
     def test_all_aliases_in_entry_points(self) -> None:
         pyproject = Path(__file__).resolve().parent.parent / "pyproject.toml"
@@ -367,6 +572,25 @@ class CommandAliasTests(unittest.TestCase):
     def test_main_is_callable(self) -> None:
         # All aliases point to skills_manager:main — verify it's importable and callable.
         self.assertTrue(callable(skills.main))
+
+    def test_all_aliases_use_the_same_entry_point(self) -> None:
+        pyproject = Path(__file__).resolve().parent.parent / "pyproject.toml"
+        text = pyproject.read_text(encoding="utf-8")
+        for alias in (
+            "skill",
+            "skills",
+            "skill-manager",
+            "skills-manager",
+            "agentic-skill-manager",
+            "agentic-skills-manager",
+        ):
+            self.assertRegex(
+                text,
+                re.compile(
+                    rf'^"?{re.escape(alias)}"?\s*=\s*"skills_manager:main"$',
+                    re.MULTILINE,
+                ),
+            )
 
 
 # ---------------------------------------------------------------------------
