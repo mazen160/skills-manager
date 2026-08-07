@@ -11,377 +11,418 @@
 
 <br>
 
-**Scan, install, update, and analyze AI agent skills without trusting them blindly.**
+**Scan before your agent trusts it.**
 
-  <a href="https://pypi.org/project/agentic-skills-manager/"><img src="https://img.shields.io/pypi/v/agentic-skills-manager?color=3FB950&label=pypi" alt="PyPI"></a>
-  <a href="https://github.com/mazen160/skills-manager/stargazers"><img src="https://img.shields.io/github/stars/mazen160/skills-manager?style=flat&logo=github" alt="GitHub Stars"></a>
-  <img src="https://img.shields.io/badge/python-3.9%2B-3FB950" alt="Python 3.9+">
-  <img src="https://img.shields.io/badge/dependencies-none-3FB950" alt="Zero dependencies">
-  <img src="https://img.shields.io/badge/single%20file-skills__manager.py-3FB950" alt="Single file">
-  <a href="https://github.com/mazen160/skills-manager/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-MIT-3FB950" alt="MIT License"></a>
+Manage skills for Claude, Cursor, Codex, and OpenCode. Skills Manager scans every install and update.
 
-[**Quickstart**](#quickstart) · [**Features**](#features) · [**Security checks**](#what-it-checks) · [**CLI reference**](#cli-reference)
+<a href="https://pypi.org/project/agentic-skills-manager/"><img src="https://img.shields.io/pypi/v/agentic-skills-manager?color=3FB950&label=pypi" alt="PyPI"></a>
+<a href="https://github.com/mazen160/skills-manager/actions/workflows/ci.yml"><img src="https://github.com/mazen160/skills-manager/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+<a href="https://github.com/mazen160/skills-manager/stargazers"><img src="https://img.shields.io/github/stars/mazen160/skills-manager?style=flat&logo=github" alt="GitHub Stars"></a>
+<img src="https://img.shields.io/badge/python-3.9%2B-3FB950" alt="Python 3.9+">
+<a href="https://github.com/mazen160/skills-manager/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-MIT-3FB950" alt="MIT License"></a>
+
+
+
+[Why](#why-i-built-it) · [Scanner](#what-the-scanner-reads) · [AI review](#ai-review-is-a-second-opinion) · [Commands](#what-it-does) · [Install](#install-and-try-it) · [Reference](#reference)
 
 </div>
 
 ---
 
-**Skills Manager** installs and manages [agent skills](https://docs.anthropic.com/en/docs/claude-code/skills) for **Claude, Cursor, Codex, and OpenCode**. Before any skill touches your config, it scans the source.
+## Why I built it
 
-I built it because installing a skill is riskier than it looks. A skill is a folder of Markdown and scripts that your coding agent reads and runs. Install one from someone else's repo and you're running their instructions inside your agent, with your files and your shell. That's a supply-chain problem, so Skills Manager treats it like one: scan the source first, block the obvious traps, and optionally hand the rest to an AI reviewer before a single file hits disk.
+An agent skill can steer tool calls, run shell commands, and read files available to your agent. Installing one means trusting more than `SKILL.md`. Setup scripts, hidden files, hooks, archives, and binaries elsewhere in the source matter too.
 
-One file. No dependencies. Python standard library only.
+I built Skills Manager because most skill installation workflows copy a repository directly into an agent's trusted directory. That is too much trust for code that can change how the agent behaves.
 
-## Features
+Skills Manager checks the selected GitHub repository or local folder before it copies anything. Static findings decide whether the operation can continue. If the skill passes, Skills Manager records its source so the same checks can run again before an update.
 
-### AI-powered security scanning
+## What the scanner reads
 
-> [!IMPORTANT]
-> **Use the agent you already trust to inspect a skill before installing it.** Add `--ai-checks` and Skills Manager sends the complete source inventory to Claude, Cursor, Codex, or OpenCode in a restricted sandbox. The AI reviewer looks for unsafe behavior and prompt-level threats that simple pattern matching cannot reliably identify, then its findings are merged with the deterministic security report.
+The scanner does not stop at `SKILL.md`. It walks the selected source tree and checks:
 
-```bash
-# Static security scan followed by an independent Claude review
-skills scan https://github.com/owner/repo --ai-checks --ai-agent claude
+- Private keys and credential-like values
+- Shell execution, subprocess use, destructive commands, and network scripts
+- Symlinks, hard links, path traversal, and unsafe archive contents
+- Git hooks, package lifecycle scripts, registry rewrites, and native loading
+- Hidden configuration, binaries, oversized files, and common scanner-evasion techniques
 
-# Ask Codex for a second opinion even when the static scan already blocked the source
-skills scan https://github.com/owner/repo --force-run-ai-checks --ai-agent codex
+The scanner reads untrusted source. It does not execute bundled skill code.
+
+```mermaid
+flowchart LR
+    Source["GitHub or local source"] --> Resolve[Resolve]
+    Resolve --> Inventory[Inventory every file]
+    Inventory --> StaticScan[Static scan]
+    Inventory --> AiReview[Optional AI review]
+    StaticScan --> Gate{Policy gate}
+    AiReview --> Gate
+    Gate -->|Pass| Lifecycle[Install or update]
+    Gate -->|Block| Report[Report and exit non-zero]
+    Lifecycle --> Metadata[Record source metadata]
 ```
 
-AI review adds another layer; it never weakens the built-in security gate. A high or critical static finding still blocks installation, even when the AI review considers the source safe.
+## See it block an unsafe skill
 
-### Everything Skills Manager can do
-
-| Feature | What it gives you |
-| --- | --- |
-| **Scan before installing** | Inspect GitHub repositories or local folders without copying anything into an agent's configuration. |
-| **Deterministic security checks** | Detect exposed secrets, dangerous shell execution, persistence hooks, registry hijacks, native loading, opaque payloads, filesystem tricks, and scanner evasion. |
-| **AI security scanning** | Run Claude, Cursor, Codex, or OpenCode as a sandboxed second reviewer and merge its findings into one verdict. |
-| **Safe installation** | Install only after security checks pass, using atomic copies that avoid leaving half-installed skills behind. |
-| **Recursive skill discovery** | Find and install every `SKILL.md` beneath a repository root, including skills stored in monorepos. |
-| **Multi-agent management** | Use the same workflow for Claude, Cursor, Codex, and OpenCode, with agent-specific install locations. |
-| **Installed-skill inventory** | List skills across one or every supported agent, with optional descriptions and installation paths. |
-| **Tracked updates** | Re-fetch original sources, compare them with installed copies, rescan changes, and apply only approved updates. |
-| **Safe uninstall** | Preview removals by default, target one agent or all agents, and require explicit confirmation before deleting anything. |
-| **Context-cost analysis** | Estimate metadata, activated-skill, and full-directory token usage while validating front matter, links, names, and file sizes. |
-| **CI enforcement** | Emit a machine-readable JSON verdict, send findings to stderr, save full reports as artifacts, and fail the job when a source is unsafe. |
-| **Flexible sources** | Work with GitHub repository URLs, tree URLs, SSH remotes, branches, tags, subdirectories, and local folders. |
-| **Automation-friendly output** | Save normalized security reports with `--output` and cost reports with `--json`. |
-| **Zero-dependency CLI** | Run the single Python file directly or install the package and use any of its four command names. |
-
-## See it catch a bad skill
-
-Here's Skills Manager refusing a skill that ships a private key, a `curl | sh` bootstrap, and an `rm -rf`. The install is blocked and nothing is copied to disk:
+The demo source includes a private key, a network download piped into a shell, a destructive command, and a hidden credential file. The scan identifies the exact files and stops before copying the skill:
 
 <div align="center">
 
-<img src="https://raw.githubusercontent.com/mazen160/skills-manager/main/assets/demo/scan.png" alt="Skills Manager scan blocking a malicious skill with a private key, curl-pipe-sh, and rm -rf" width="100%">
-
-*The static scanner explains every finding, returns a non-zero exit code, and leaves the agent's skills directory untouched.*
+<img src="https://raw.githubusercontent.com/mazen160/skills-manager/main/assets/demo/scan.png" alt="Skills Manager blocking a malicious skill before installation" width="880">
 
 </div>
 
-## Why Skills Manager
+```text
+Security result: unsafe (critical)
+[CRITICAL] .env: Private key material found.
+[HIGH] setup.sh: Network script piped into a shell.
+[HIGH] setup.sh: Destructive 'rm -rf' command found.
+exit code: 1
+```
 
-A skill can hide a lot in plain sight: a private key, a `curl | sh` one-liner, a git hook that reinstalls itself after you delete it, a binary blob a text scanner skips, or instructions buried behind padding or opaque files. Once that folder is in `~/.claude/skills/`, your agent reads it and acts on it like any other instruction.
+## AI review is a second opinion
 
-Skills Manager puts a checkpoint in front of the copy step:
+Static checks run every time. Add `--ai-checks` when you also want Claude, Cursor, Codex, or OpenCode to review the source for intent that pattern matching cannot settle:
 
-- Static checks run on every command and block high and critical findings. No flag to remember.
-- AI checks are opt-in (`--ai-checks`). A sandboxed agent reviews the source on its own and writes a JSON verdict.
-- Skills have to be source-readable text. If a package ships binaries, archives, native libraries, bytecode, symlinks, or hard links, Skills Manager rejects it.
+```bash
+skills scan https://github.com/owner/repo \
+  --ai-checks --ai-agent codex
+```
 
-> **Inspect first. Install second. Keep every skill traceable.**
+The selected agent's findings join the report, but its verdict cannot clear a static block. By default, a blocked static scan skips AI review. `--force-run-ai-checks` runs it anyway while keeping the source blocked.
 
-## Install
+The four agent CLIs do not provide the same isolation. Read the [security policy](https://github.com/mazen160/skills-manager/blob/main/SECURITY.md) before reviewing untrusted source on a workstation with sensitive files or credentials.
 
-Install from PyPI with pip. You get a `skills` command on your `PATH`:
+## What it does
+
+| Command | What it does |
+| --- | --- |
+| `scan` | Reviews a GitHub or local source without installing it. |
+| `install` | Scans the source, applies the severity policy, and copies approved skills atomically. |
+| `list` | Shows installed skills across Claude, Cursor, Codex, and OpenCode. |
+| `update` | Fetches the tracked source, compares it with the installed copy, scans it again, and optionally applies the update. |
+| `analyze` | Reports file counts, size, validation problems, broken links, and estimated context use for each skill. |
+| `uninstall` | Previews and removes an installed skill. |
+
+`scan` and `analyze` also have CI modes with JSON verdicts and non-zero policy exits.
+
+## Install and try it
 
 ```bash
 pip install agentic-skills-manager
-skills --help
+
+skills scan https://github.com/owner/repo
+skills install https://github.com/owner/repo
+skills list --verbose
 ```
 
-Prefer an isolated install? Use [pipx](https://pipx.pypa.io/):
+`install` scans the source again before copying it. For an isolated CLI environment, use `pipx install agentic-skills-manager` instead.
 
-```bash
-pipx install agentic-skills-manager
-```
+The package installs six command names: `skill`, `skills`, `skill-manager`, `skills-manager`, `agentic-skill-manager`, and `agentic-skills-manager`. They all run the same entry point. This README uses `skills`.
 
-Or skip the install. It's one file with no dependencies, so you can run it straight from source:
+<details>
+<summary><b>Requirements and running from source</b></summary>
+
+You need Python 3.9 or later. GitHub sources also need `git` on `PATH`. AI review needs the selected local agent CLI: `claude`, `cursor`, `codex`, or `opencode`.
+
+The production module has no third-party Python dependencies. You can run it without installing the package:
 
 ```bash
 curl -O https://raw.githubusercontent.com/mazen160/skills-manager/main/skills_manager.py
 python3 skills_manager.py --help
 ```
 
-> The PyPI distribution is `agentic-skills-manager`. The product is still Skills Manager, and installing it gives you six equivalent commands: `skill`, `skills`, `skill-manager`, `skills-manager`, `agentic-skill-manager`, and `agentic-skills-manager`. If you're running from source, use `python3 skills_manager.py`.
+</details>
 
-Run `skills` with no arguments for the full command surface:
+Run `skills` with no arguments to print the banner and command list.
 
 <div align="center">
 
-<img src="https://raw.githubusercontent.com/mazen160/skills-manager/main/assets/demo/banner.png" alt="Skills Manager command-line help and command list" width="100%">
-
-*One CLI manages the same workflow across Claude, Cursor, Codex, and OpenCode.*
+<img src="https://raw.githubusercontent.com/mazen160/skills-manager/main/assets/demo/banner.png" alt="Skills Manager command-line banner and help" width="880">
 
 </div>
 
-## Quickstart
+## Common workflows
+
+### Work with local, single-file, and monorepo sources
 
 ```bash
-# Scan a skill source without installing anything
-skills scan https://github.com/owner/repo
+# Scan locally without copying anything
+skills scan ./path/to/skill
 
-# Print the Skills Manager banner
-skills --banner
+# Install one skill from a GitHub blob URL
+skills install https://github.com/blader/humanizer/blob/main/SKILL.md
 
-# Print the installed version
-skills --version
-
-# Scan, then run a second-round AI review with Claude
-skills scan https://github.com/owner/repo --ai-checks
-
-# Run the AI review even when static checks already failed (for visibility)
-skills scan https://github.com/owner/repo --force-run-ai-checks
-
-# Scan in CI: machine-readable verdict on stdout, findings on stderr, non-zero exit when unsafe
-skills scan https://github.com/owner/repo --ci
-
-# Save the full result JSON as a CI artifact
-skills scan https://github.com/owner/repo --ci --output result.json
-
-# Install into Claude (default) after checks pass
-skills install https://github.com/owner/repo
-
-# Install into Cursor instead
-skills install https://github.com/owner/repo --agent cursor
-
-# Tighten the install gate: block medium, high, and critical findings
-skills install https://github.com/owner/repo --minimum-accepted-severity low
-
-# Install one skill from a subfolder of a monorepo
-skills install https://github.com/owner/repo/tree/main/skills/my-skill
-
-# Install every skill under a root (recursive SKILL.md discovery)
+# Find every skill below a repository root
 skills install https://github.com/owner/repo --recursive
 
-# See what's installed across all agents
-skills list
-
-# Show descriptions and install paths
-skills list --verbose
-
-# Check tracked skills for upstream changes, then apply them
-skills update
-skills update --apply
-
-# Use the same AI-review controls while checking or applying updates
-skills update --ai-checks --ai-agent codex --ai-agent-timeout-seconds 300
-
-# Remove a skill (dry-run first; -y to actually delete)
-skills uninstall my-skill
-skills uninstall my-skill -y
-
-# Analyze all installed skills, or pass local and GitHub sources explicitly
-skills analyze
-skills analyze ~/.claude/skills ~/.codex/skills --load-mode metadata
-skills analyze ./path/to/skill --json
-skills analyze ./path/to/skill/SKILL.md
-skills analyze https://github.com/owner/repo
-skills analyze https://github.com/owner/repo/blob/main/path/to/SKILL.md
+# Install for Codex instead of Claude, the default target
+skills install https://github.com/owner/repo --agent codex
 ```
 
-## CLI reference
+Blob URLs ending in `SKILL.md` resolve to the containing skill directory. Variants with `?plain=1` or a line fragment work too. With `--recursive`, each directory below the selected root that contains `SKILL.md` becomes an install candidate.
 
-| Command | Description |
+### Block medium-severity findings
+
+```bash
+skills install https://github.com/owner/repo \
+  --minimum-accepted-severity low
+```
+
+Low and medium findings pass by default. Setting the accepted ceiling to `low` blocks anything medium or above.
+
+To get an AI opinion after a static block, add `--force-run-ai-checks --ai-agent claude`. The static verdict still determines the exit status.
+
+### Check and apply updates
+
+```bash
+skills update
+skills update --apply --ai-checks --ai-agent codex
+```
+
+The first command compares installed content with its tracked source. The second applies the update after its security checks pass.
+
+### Analyze context and enforce limits in CI
+
+```bash
+skills analyze ~/.claude/skills ~/.codex/skills \
+  --max-skill-tokens 50000 --max-file-tokens 10000 \
+  --fail-on-max-tokens
+
+skills scan https://github.com/owner/repo --ci --output result.json
+skills analyze ./skills --ci --fail-on-max-tokens
+```
+
+For each skill, `analyze` shows its size, file count, validation errors, and three token estimates: metadata only, `SKILL.md`, and the full directory. CI mode writes JSON to stdout, sends the human report to stderr, and returns non-zero when policy fails.
+
+## Where the protection stops
+
+Skills Manager scans before it copies. Static checks always run, and high or critical findings block installation by default. You can tighten that ceiling, or bypass it explicitly with `--unsafe-install` after reviewing the source yourself. The flag still prints every finding.
+
+Approved files are copied atomically and tagged with source metadata for later update checks. After installation, the host agent decides how to interpret and execute the skill. Skills Manager is not a runtime sandbox, and a clean report is not proof that a skill is safe.
+
+AI review can add findings. It cannot remove a static finding or make a blocked source pass.
+
+The full trust model, reviewer isolation, and private reporting instructions are in [SECURITY.md](https://github.com/mazen160/skills-manager/blob/main/SECURITY.md).
+
+## Reference
+
+<details>
+<summary><b>Commands and supported sources</b></summary>
+
+| Command | Purpose |
 | --- | --- |
-| `skills scan SOURCE` | Inspect a GitHub or local source with deterministic checks and optional AI review. |
-| `skills install SOURCE` | Scan and atomically install one skill or recursively discovered skills. |
-| `skills list` | List installed skills for one agent or across every supported agent. |
-| `skills update [SKILL]` | Re-fetch tracked sources, show changes, rescan them, and optionally apply approved updates. |
-| `skills uninstall SKILL` | Preview or confirm removal from one agent or all supported agents. |
-| `skills analyze [SOURCE...]` | Estimate context usage and validate installed skills, local paths, or GitHub sources. |
-| `skills --banner` | Print the Skills Manager banner and exit. |
-| `skills --version` | Print the installed Skills Manager version. |
+| `skills scan SOURCE` | Inspect a GitHub or local source without installing it. |
+| `skills install SOURCE` | Scan and atomically install one or more skills. |
+| `skills list` | List installed skills for one agent or all supported agents. |
+| `skills update [SKILL]` | Re-fetch tracked sources, compare content, re-scan, and optionally apply changes. |
+| `skills uninstall SKILL` | Preview or confirm removal from one or all supported agents. |
+| `skills analyze [SOURCE...]` | Measure context use and validate installed, local, or GitHub skills. |
+| `skills --banner` | Print the banner and exit. |
+| `skills --version` | Print the installed version and exit. |
 
-Every installed command name is equivalent: `skill`, `skills`, `skill-manager`, `skills-manager`, `agentic-skill-manager`, and `agentic-skills-manager`.
+Run `skills COMMAND --help` for the flags accepted by that command.
 
-Use `claude`, `cursor`, `codex`, or `opencode` for agent arguments. For compatibility, `claude-code` and `claude_code` are accepted as `claude`, while `open-code` and `open_code` are accepted as `opencode`. CLI help stays focused on the canonical names.
+### Supported sources
 
-`skills scan` prints the full file list before scanning, then a compact relevant-files table after static checks, including `SKILL.md`, executable scripts, dependency manifests, hidden files, symlinks, archives, compiled payloads, and files with deterministic findings.
+| Source | Example | Commands |
+| --- | --- | --- |
+| GitHub repository | `https://github.com/owner/repo` | scan, install, analyze |
+| GitHub tree | `https://github.com/owner/repo/tree/main/skills/example` | scan, install, analyze |
+| GitHub `SKILL.md` blob | `https://github.com/owner/repo/blob/main/skills/example/SKILL.md` | scan, install, analyze |
+| GitHub SSH remote | `git@github.com:owner/repo.git` | scan, install, analyze |
+| Local directory | `./path/to/skill` | scan, install, analyze |
+| Local `SKILL.md` | `./path/to/skill/SKILL.md` | analyze |
 
-## What it checks
+`--path` selects a subdirectory, while `--branch` selects a branch or tag. Both require a single source argument. Skills Manager uses a sparse, blobless clone for GitHub subdirectories.
 
-The static pass walks the whole source tree and focuses on deterministic supply-chain techniques rather than trying to guess intent from prose:
+</details>
+
+<details>
+<summary><b>Static scanner and install policy</b></summary>
 
 | Category | Examples |
 | --- | --- |
-| Secrets & keys | `BEGIN PRIVATE KEY`, `id_rsa`, `.pem`/`.key`, `api_key = "…"` |
-| Execution surfaces | `curl … \| sh`, `rm -rf /`, `chmod +x`, `eval`/`exec`, `subprocess`, `os.system` |
-| Non-text payloads | binaries, images, archives, Office docs, `.pyc`, `.so`/`.dll`, `.jar`, `.node` |
-| Archive indirection | path traversal inside archives, embedded bytecode/native files, embedded scripts, hidden config files |
-| Filesystem tricks | symlinks, absolute/escaping links, hard links, hard links that point outside the scanned tree, embedded `.git` metadata, hidden files |
-| Persistence | `.git/hooks`, `core.hooksPath`, `.husky`, package lifecycle scripts |
-| Registry hijacks | `.npmrc`/`.yarnrc` rewrites, `PIP_INDEX_URL`, extra index URLs |
-| Native loading | `LD_PRELOAD`, `DYLD_INSERT_LIBRARIES`, `ctypes.CDLL`, `dlopen`, runtime `.so` compilation |
-| Scanner evasion | long whitespace padding, more than 2,000 lines, more than 140,000 chars, files too large to fully scan |
-| Credential harvesting surface | executable code that reads environment variables |
+| Secrets and keys | Private key blocks, key files, credential-like assignments |
+| Execution surfaces | Network scripts piped to shells, destructive commands, `eval`, `exec`, subprocess and shell APIs |
+| Non-text payloads | Binaries, bytecode, native libraries, archives, document containers, images |
+| Archive indirection | Path traversal, embedded scripts or compiled payloads, hidden configuration, excessive contents |
+| Filesystem tricks | Symlinks, escaping or absolute links, hard links, embedded `.git` metadata, hidden files |
+| Persistence | Git hooks, `core.hooksPath`, Husky hooks, package lifecycle scripts |
+| Registry hijacks | npm/yarn registry rewrites, pip index and extra-index settings |
+| Native loading | `LD_PRELOAD`, `DYLD_INSERT_LIBRARIES`, `ctypes.CDLL`, `dlopen`, runtime compilation |
+| Scanner evasion | Long padding, pathological line or character counts, files too large to inspect completely |
+| Credential access | Executable code that reads process environment variables |
 
-By default, `install --minimum-accepted-severity medium` allows low and medium findings while high and critical findings block installation. Use `--minimum-accepted-severity low` for a stricter gate that also blocks medium findings, or `--minimum-accepted-severity high` to block only critical findings. The verdict is printed by default; pass `--output PATH` when you want to save the normalized JSON report.
+Static checks intentionally avoid simple phrase matching for prompt injection. Use AI checks when source intent requires semantic review.
 
-The static pass does not try to detect prompt injection by matching phrases like "ignore previous instructions" or "exfiltrate tokens." Those checks are too easy to bypass and too noisy to trust. The AI pass (`--ai-checks`) hands the inventory and source to the agent CLI you pick (`--ai-agent claude|cursor|codex|opencode`). It runs in a restricted sandbox, reviews the source on its own, and merges its findings with the static ones. Set its execution limit with `--ai-agent-timeout-seconds`; normal output hides the large prompt and inventory, and `--show-ai-inputs` reveals them for debugging.
+### Severity policy
 
-The AI pass runs only after static checks pass, so a source that already failed static checks never reaches it. Add `--force-run-ai-checks` on `scan`, `install`, or `update` to run the AI review anyway when you want its verdict for a blocked source. It implies `--ai-checks` and is for visibility only: it never overrides the command's security gate.
+`install` and `update` accept `--minimum-accepted-severity {low,medium,high}`. The value is the highest severity permitted:
 
-## Use in CI
+| Accepted ceiling | Blocks |
+| --- | --- |
+| `low` | medium, high, critical |
+| `medium` (default) | high, critical |
+| `high` | critical |
 
-Add `--ci` to `scan` to run the scanner in a pipeline. CI mode drops the banner, file tables, and colored progress output and emits only the result:
+Related install controls:
 
-- A machine-readable verdict (one line of JSON) on **stdout**, so a job can capture and parse it.
-- Human-readable findings and a summary on **stderr**, so they still show up in the build log.
-- Exit code `0` when safe and `1` when unsafe, so the step fails on a bad skill.
+| Flag | Effect |
+| --- | --- |
+| `--force-install` | Replace an already-installed skill instead of skipping it. |
+| `--unsafe-install` | Continue despite blocking findings. Use only after deliberate manual review. |
+| `--recursive` | Install every discovered directory containing `SKILL.md`. |
+| `--output PATH` | Write the normalized security report to a file. |
 
-```bash
-# Fail the job if the source is unsafe
-skills scan https://github.com/owner/repo --ci
+</details>
 
-# Also write the full result JSON to a file for use as a build artifact
-skills scan https://github.com/owner/repo --ci --output result.json
+<details>
+<summary><b>AI review controls and boundaries</b></summary>
 
-# Include the AI review in CI (needs the agent CLI on PATH)
-skills scan https://github.com/owner/repo --ci --ai-checks
-```
+| Flag | Effect |
+| --- | --- |
+| `--ai-checks` | Run AI review after static checks pass. |
+| `--force-run-ai-checks` | Run AI review even after a static block; never overrides the gate. |
+| `--ai-agent AGENT` | Select `claude` (default), `cursor`, `codex`, or `opencode`. |
+| `--ai-agent-timeout-seconds N` | Set the AI reviewer timeout; default is 300 seconds. |
+| `--show-ai-inputs` | Print the complete prompt and deterministic inventory for debugging. |
 
-The stdout verdict looks like:
+The selected agent CLI receives the source, deterministic inventory, and review prompt. Depending on its configuration, it may send that material to a model provider. The subprocess also inherits your environment.
+
+Isolation varies by agent. Claude gets a read-only tool allowlist. Codex runs in an ephemeral workspace-write sandbox without approval escalation. Cursor runs in trusted mode. OpenCode currently has no explicit filesystem or network sandbox. Review sensitive source from a low-privilege environment and read the [security policy](https://github.com/mazen160/skills-manager/blob/main/SECURITY.md) first.
+
+</details>
+
+<details>
+<summary><b>Context analysis and CI output</b></summary>
+
+With no source, `skills analyze` inspects installed skills for all supported agents. It also accepts multiple local folders, local `SKILL.md` files, GitHub repositories, tree URLs, and blob URLs.
+
+Every discovered skill report includes total bytes, characters, lines, words, estimated tokens, file count, individual file records, and validation findings.
+
+| Load mode | Measures |
+| --- | --- |
+| `metadata` | Catalog footprint from the skill name, description, and path. |
+| `skill` | The activated `SKILL.md`. |
+| `full` | Every file beneath the skill directory; the default headline and sort mode. |
+
+Token estimates use `characters / 4`. They are a useful policy heuristic, not exact tokenizer output.
+
+| Flag | Effect |
+| --- | --- |
+| `--json` | Print the full machine-readable analysis report. |
+| `--ci` | Print a JSON verdict to stdout and findings to stderr; fail on invalid skills. |
+| `--no-files` | Omit individual per-file records from JSON output. |
+| `--load-mode MODE` | Select `metadata`, `skill`, or `full`. |
+| `--max-skill-tokens N` | Warn when a complete skill exceeds the estimated token limit; default 50,000. |
+| `--max-file-tokens N` | Warn when one file exceeds the estimated token limit; default 10,000. |
+| `--fail-on-max-tokens` | Exit 1 when either configured token limit is exceeded. |
+| `--fail-on-invalid` | Exit 1 for invalid skills; source-level errors exit 2. |
+
+Validation covers missing, empty, or non-UTF-8 `SKILL.md` files; malformed front matter; missing names or descriptions; name and directory mismatches; broken relative Markdown links; and configured size limits.
+
+### CI output
+
+`scan --ci` suppresses the banner, colors, progress, and file tables. It writes one JSON verdict to stdout and the human report to stderr. Exit code `0` means safe; `1` means unsafe. Use `--output PATH` to save the normalized report as a build artifact.
 
 ```json
 {"ai_skipped": false, "findings": 6, "review_type": "static", "risk_level": "critical", "safe": false, "source": "https://github.com/owner/repo", "tool": "skills-manager"}
 ```
 
-`ai_skipped` is `true` when you asked for `--ai-checks` but static checks failed first, so the AI review never ran (use `--force-run-ai-checks` to run it anyway).
+For analysis, `analyze --ci` uses the same stdout/stderr split and fails on invalid skills. Add `--fail-on-max-tokens` when token ceilings must also fail the job.
 
-`--output` writes the full normalized result (verdict, risk level, summary, and every finding) so later steps can read it without re-scanning. It works on any `scan`, with or without `--ci`.
+</details>
 
-## Analyze context usage
-
-Skills cost context. A catalog of skills looks cheap, but activating a large `SKILL.md` or following its references into companion files can quietly burn tens of thousands of tokens. `skills analyze` makes those layers visible and flags invalid skills at the same time.
-
-```bash
-# Estimate context usage across installed skills for all supported agents
-skills analyze
-
-# Analyze one or more explicit local folders or SKILL.md files
-skills analyze ~/.claude/skills ~/.codex/skills
-skills analyze ./my-skill/SKILL.md
-
-# Clone and analyze a GitHub repository, tree, or SKILL.md blob URL
-skills analyze https://github.com/owner/repo
-skills analyze https://github.com/owner/repo/tree/main/skills/example
-skills analyze https://github.com/owner/repo/blob/main/skills/example/SKILL.md
-
-# Machine-readable output for scripts and CI
-skills analyze ~/.claude/skills --json
-
-# Exit non-zero when an invalid skill is found (useful in CI)
-skills analyze ~/.claude/skills --fail-on-invalid
-
-# Exit non-zero when either configured token limit is exceeded
-skills analyze ~/.claude/skills --max-skill-tokens 50000 --max-file-tokens 10000 --fail-on-max-tokens
-
-# CI: JSON verdict on stdout, findings on stderr, non-zero when invalid
-skills analyze ~/.claude/skills --ci
-```
-
-It treats every directory containing a `SKILL.md` as a skill and reports every skill's total size, file count, validation status, and three load estimates, because not every skill is fully loaded at once. JSON output also includes the complete per-file inventory with byte, character, line, word, and estimated-token counts.
-
-| Mode | What it measures |
-| --- | --- |
-| `metadata` | Catalog footprint from `name`, `description`, and path |
-| `skill` | Footprint of the activated `SKILL.md` |
-| `full` | Upper bound: every file under the skill directory |
-
-Use `--load-mode {metadata,skill,full}` to choose which estimate sorts and headlines the report (default: `full`). Token counts use a simple `characters / 4` heuristic, so they are estimates, not exact tokenizer counts.
-
-Beyond cost, the same pass validates skills and reports errors (missing/empty/non-UTF-8 `SKILL.md`, missing or unclosed YAML front matter, missing `name`/`description`, broken relative markdown links) and warnings (name/folder mismatch, oversized skills or files). Errors make a skill invalid; warnings do not.
-
-| Flag | Effect |
-| --- | --- |
-| `--json` | Print machine-readable JSON instead of the terminal report |
-| `--ci` | Print a JSON verdict to stdout, findings to stderr, and exit non-zero when unsafe |
-| `--no-files` | Exclude individual file details from JSON output |
-| `--load-mode MODE` | Sort/headline by `metadata`, `skill`, or `full` |
-| `--max-skill-tokens N` | Warn when a full skill directory exceeds N estimated tokens (default: 50000) |
-| `--max-file-tokens N` | Warn when a single file exceeds N estimated tokens (default: 10000) |
-| `--fail-on-max-tokens` | Exit 1 when either configured token limit is exceeded |
-| `--fail-on-invalid` | Exit 1 when invalid skills are found (root errors always exit 2) |
-
-## Sources
-
-Skills Manager installs from:
-
-- a GitHub repo URL: `https://github.com/owner/repo`
-- a GitHub tree URL: `https://github.com/owner/repo/tree/<branch>/<path>`
-- an SSH remote: `git@github.com:owner/repo.git`
-- a local folder: `./path/to/skill`
-
-Use `--path` to pick a subfolder and `--branch` to target a branch or tag. GitHub sources are fetched with a sparse, blobless clone when a path is given.
-
-## Where skills are installed
+<details>
+<summary><b>Agents, paths, aliases, and lifecycle behavior</b></summary>
 
 | Agent | Default location | Override |
 | --- | --- | --- |
 | Claude | `~/.claude/skills` | `CLAUDE_SKILLS_DIR` |
+| Cursor | `~/.cursor/skills-cursor` or `~/.cursor/skills` | `CURSOR_SKILLS_DIR` |
 | Codex | `~/.codex/skills` | `CODEX_SKILLS_DIR` |
-| Cursor | `~/.cursor/skills-cursor` (or `~/.cursor/skills`) | `CURSOR_SKILLS_DIR` |
 | OpenCode | `~/.opencode/skills` | `OPENCODE_SKILLS_DIR` |
 
-Installed skills carry a small `.skills-install.json` record of where they came from, which is what makes `skills update` able to re-fetch and diff them later.
+Canonical agent arguments are `claude`, `cursor`, `codex`, and `opencode`. Compatibility spellings `claude-code` and `claude_code` map to Claude; `open-code` and `open_code` map to OpenCode.
 
-## Under the hood
+All installed command names execute the same entry point:
 
-Skills Manager is a single standard-library Python module. It resolves untrusted sources into a temporary workspace, inventories the filesystem before reading content, and keeps the security decision separate from the copy step.
-
-1. **Resolve.** Fetch the source into a temporary directory using a sparse clone for GitHub paths or a direct read for local folders.
-2. **Inventory.** Walk the complete tree and classify regular files, links, archives, binaries, executable surfaces, and skill roots.
-3. **Gate.** Run deterministic checks every time, then add the sandboxed AI review when `--ai-checks` is set. High or critical findings stop the workflow.
-4. **Install.** Copy approved `SKILL.md` directories atomically and record their source metadata for future update checks.
-
-## Requirements
-
-- Python 3.9+
-- `git` on your `PATH` (for GitHub sources)
-- For `--ai-checks`: the chosen agent's CLI on your `PATH` (`claude`, `cursor`, `codex`, or `opencode`)
-
-## Tests
-
-The test suite is standard-library only. From the repo root:
-
-```bash
-python3 -m unittest discover -s tests
+```text
+skill
+skills
+skill-manager
+skills-manager
+agentic-skill-manager
+agentic-skills-manager
 ```
 
-It covers the deterministic static checks (including a bytecode-poisoning regression), source/URL parsing, argument validation, and the cost analyzer.
+### Install, update, and uninstall
 
-## Found this useful?
+Skills Manager copies approved skills atomically, then writes `.skills-install.json` with the source needed for future update checks.
 
-If Skills Manager keeps an unsafe skill out of your agent, please [**star the repository**](https://github.com/mazen160/skills-manager). It helps other developers discover the project.
+`skills update` fetches that source again, compares it with the installed files, and reports any changes. Add `--apply` to install an approved update. Updates accept the same AI and severity controls as installs.
 
-Share it:
+`skills uninstall NAME` previews the removal. Add `--yes` or `-y` to delete it. Use `--agent` for one agent or `--all-agents` for every supported agent.
 
-[![Share on X](https://img.shields.io/badge/Share-on%20X-000?logo=x&logoColor=white&style=flat)](https://twitter.com/intent/tweet?text=Skills%20Manager%20scans%20AI%20agent%20skills%20before%20they%20touch%20your%20config.%20Static%20checks%2C%20optional%20AI%20review%2C%20safe%20installs%2C%20updates%2C%20and%20context-cost%20analysis.&url=https%3A%2F%2Fgithub.com%2Fmazen160%2Fskills-manager&hashtags=AIAgents,Security,DevTools)
-[![Submit to Hacker News](https://img.shields.io/badge/Submit-Hacker%20News-FF6600?logo=ycombinator&logoColor=white&style=flat)](https://news.ycombinator.com/submitlink?u=https%3A%2F%2Fgithub.com%2Fmazen160%2Fskills-manager&t=Show%20HN%3A%20Skills%20Manager%20%E2%80%93%20scan%20AI%20agent%20skills%20before%20installing%20them)
-[![Share on Reddit](https://img.shields.io/badge/Share-Reddit-FF4500?logo=reddit&logoColor=white&style=flat)](https://www.reddit.com/submit?url=https%3A%2F%2Fgithub.com%2Fmazen160%2Fskills-manager&title=Skills%20Manager%20%E2%80%93%20scan%20AI%20agent%20skills%20before%20installing%20them)
-[![Share on LinkedIn](https://img.shields.io/badge/Share-LinkedIn-0A66C2?logo=linkedin&logoColor=white&style=flat)](https://www.linkedin.com/sharing/share-offsite/?url=https%3A%2F%2Fgithub.com%2Fmazen160%2Fskills-manager)
+</details>
+
+<details>
+<summary><b>Development and tests</b></summary>
+
+The production CLI and test suite use only the Python standard library. CI runs the tests on Python 3.9 through 3.13 and verifies all six package entry points.
+
+```bash
+git clone https://github.com/mazen160/skills-manager.git
+cd skills-manager
+python3 -m unittest discover -s tests -v
+```
+
+Packaging and contributor instructions live in [CONTRIBUTING.md](https://github.com/mazen160/skills-manager/blob/main/CONTRIBUTING.md).
+
+</details>
+
+## Project status
+
+Skills Manager 1.0.0 is available on [PyPI](https://pypi.org/project/agentic-skills-manager/). CI tests it on Python 3.9 through 3.13.
+
+## Troubleshooting
+
+<details>
+<summary><b>Common errors and fixes</b></summary>
+
+#### `skills: command not found`
+
+The package's script directory is not on `PATH`. Reopen the shell or run `pipx ensurepath` if you installed with pipx. With a user-level pip install, add the script directory reported by `python3 -m pip install --user agentic-skills-manager` to `PATH`.
+
+#### Unsupported source URL
+
+Skills Manager accepts GitHub repository, tree, and `blob/.../SKILL.md` URLs, GitHub SSH remotes, and local directories. It intentionally rejects raw downloads and arbitrary website URLs.
+
+#### The install was blocked
+
+Read the reported files and findings. Run `skills scan SOURCE --output result.json` for the full report, or add `--ai-checks` for an AI review. Use `--unsafe-install` only after you have manually accepted the risk.
+
+#### The AI reviewer is missing or timed out
+
+Install and authenticate the selected agent CLI, then confirm it is on `PATH`. If the source needs longer than 300 seconds, raise `--ai-agent-timeout-seconds`.
+
+#### `skills update` cannot find the source
+
+Updates require the source metadata written during installation. Reinstall the skill through Skills Manager to create `.skills-install.json`.
+
+</details>
+
+## Contributing
+
+Issues and pull requests are welcome. Start with [CONTRIBUTING.md](https://github.com/mazen160/skills-manager/blob/main/CONTRIBUTING.md) for the development, test, and packaging workflow. Security-sensitive findings belong in the private channel documented in [SECURITY.md](https://github.com/mazen160/skills-manager/blob/main/SECURITY.md), not a public issue.
+
+See the [changelog](https://github.com/mazen160/skills-manager/blob/main/CHANGELOG.md) for release history.
 
 ## Author
 
-**Mazin Ahmed**
-
-- Website: [mazinahmed.net](https://mazinahmed.net)
-- Twitter: [@mazen160](https://twitter.com/mazen160)
-- LinkedIn: [linkedin.com/in/infosecmazinahmed](https://linkedin.com/in/infosecmazinahmed)
-- GitHub: [github.com/mazen160](https://github.com/mazen160)
+Mazin Ahmed: [Website](https://mazinahmed.net) · [X](https://twitter.com/mazen160) · [LinkedIn](https://linkedin.com/in/infosecmazinahmed) · [GitHub](https://github.com/mazen160)
 
 ## License
 
-MIT © Mazin Ahmed
+MIT © Mazin Ahmed. See the [license](https://github.com/mazen160/skills-manager/blob/main/LICENSE).
