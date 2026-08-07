@@ -11,7 +11,7 @@
 
 <br>
 
-**Scan before your agent trusts it.**
+**Scan skills before your agent trusts it.**
 
 Manage skills for Claude, Cursor, Codex, and OpenCode. Skills Manager scans every install and update.
 
@@ -173,6 +173,22 @@ Low and medium findings pass by default. Setting the accepted ceiling to `low` b
 
 To get an AI opinion after a static block, add `--force-run-ai-checks --ai-agent claude`. The static verdict still determines the exit status.
 
+### Exclude a reviewed rule or path
+
+Every finding prints a stable rule ID. Exclusions are repeatable:
+
+```bash
+skills scan ./plugin-repository \
+  --exclude git-hook-directory \
+  --exclude git-hook-configuration
+
+skills install ./skill \
+  --exclude-path .githooks \
+  --exclude-path 'docs/private/**'
+```
+
+`--exclude RULE` removes that rule from the verdict but leaves the matching content in place. `--exclude-path GLOB` omits matching source-relative content from the scan and, during installation, from the installed copy. Install exclusions are recorded in `.skills-install.json` and preserved by future updates.
+
 ### Check and apply updates
 
 ```bash
@@ -274,6 +290,8 @@ Related install controls:
 | `--unsafe-install` | Continue despite blocking findings. Use only after deliberate manual review. |
 | `--recursive` | Install every discovered directory containing `SKILL.md`. |
 | `--output PATH` | Write the normalized security report to a file. |
+| `--exclude RULE` | Exclude a displayed scanner rule ID; repeatable. |
+| `--exclude-path GLOB` | Exclude a source-relative path from scanning and installation; repeatable. |
 
 </details>
 
@@ -384,7 +402,7 @@ Packaging and contributor instructions live in [CONTRIBUTING.md](https://github.
 
 ## Project status
 
-Skills Manager 1.0.1 is available on [PyPI](https://pypi.org/project/agentic-skills-manager/). CI tests it on Python 3.9 through 3.13.
+Skills Manager 1.0.2 is available on [PyPI](https://pypi.org/project/agentic-skills-manager/). CI tests it on Python 3.9 through 3.13.
 
 ## Troubleshooting
 

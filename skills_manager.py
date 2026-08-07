@@ -23,7 +23,7 @@ from collections import Counter
 from contextlib import contextmanager, redirect_stdout
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, Iterable, Iterator
 from urllib.parse import unquote, urlparse
 
@@ -31,7 +31,7 @@ from urllib.parse import unquote, urlparse
 # Constants, branding, and terminal output
 
 
-__version__ = "1.0.1"
+__version__ = "1.0.2"
 SUPPORTED_AGENTS = ("claude", "cursor", "codex", "opencode")
 AGENT_ALIASES = {
     "claude": "claude",
@@ -109,7 +109,9 @@ BLOCKED_BYTECODE_SUFFIXES = {".pyc", ".pyo"}
 BLOCKED_NATIVE_SUFFIXES = {".so", ".dylib", ".dll", ".pyd", ".node", ".class", ".jar"}
 ARCHIVE_SUFFIXES = {".zip", ".tar", ".gz", ".tgz", ".xz", ".bz2", ".7z", ".rar"}
 DOCUMENT_ARCHIVE_SUFFIXES = {".docx", ".xlsx", ".pptx", ".odt", ".ods", ".odp"}
+DOCUMENT_SUFFIXES = {".pdf"}
 IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".tiff", ".ico"}
+FONT_SUFFIXES = {".woff", ".woff2", ".ttf", ".otf"}
 EXECUTABLE_TEXT_SUFFIXES = {
     ".sh",
     ".bash",
@@ -118,8 +120,12 @@ EXECUTABLE_TEXT_SUFFIXES = {
     ".py",
     ".js",
     ".ts",
+    ".tsx",
+    ".jsx",
     ".mjs",
     ".cjs",
+    ".cmd",
+    ".bat",
     ".rb",
     ".pl",
     ".php",
@@ -143,6 +149,19 @@ TEXTLIKE_SUFFIXES = {
     ".xml",
     ".css",
     ".svg",
+    ".sql",
+    ".mdx",
+    ".rst",
+    ".adoc",
+    ".erb",
+    ".lock",
+    ".graphql",
+    ".gql",
+    ".proto",
+    ".properties",
+    ".gradle",
+    ".tf",
+    ".hcl",
 } | EXECUTABLE_TEXT_SUFFIXES
 SENSITIVE_DOTFILES = {
     ".env",
@@ -155,7 +174,38 @@ SENSITIVE_DOTFILES = {
     ".wgetrc",
     ".gitconfig",
 }
-PERSISTENCE_DIR_NAMES = {".husky", "hooks", "git-hooks"}
+GIT_HOOK_DIR_NAMES = {".githooks", ".husky", "git-hooks"}
+CONVENTIONAL_HIDDEN_NAMES = {
+    ".circleci",
+    ".claude-plugin",
+    ".editorconfig",
+    ".gitattributes",
+    ".github",
+    ".gitignore",
+    ".gitkeep",
+    ".mcp.json",
+    ".prettierignore",
+}
+FINDING_RULE_IDS = {
+    "Agent hook directory found.": "agent-hook-directory",
+    "Binary file content found.": "binary-content",
+    "Binary font asset found.": "binary-font-asset",
+    "Code execution primitive found.": "code-execution-primitive",
+    "Credential-like assignment found.": "credential-assignment",
+    "Environment variable access API or command found in executable code.": "environment-access",
+    "Executable file mode is set.": "executable-file-mode",
+    "Git hook directory found.": "git-hook-directory",
+    "Hidden directory found in skill package.": "hidden-directory",
+    "Hidden file found in skill package.": "hidden-file",
+    "Image asset found; multimodal prompt injection is possible.": "image-prompt-injection",
+    "Internal symlink found in skill package.": "internal-symlink",
+    "MCP server configuration found.": "mcp-server-configuration",
+    "Network script piped into a shell.": "network-pipe-to-shell",
+    "PDF document requires manual review.": "pdf-manual-review",
+    "Persistent git hook configuration found.": "git-hook-configuration",
+    "Potentially destructive remove command found.": "destructive-remove",
+    "Private key material found.": "private-key-material",
+}
 
 # Analyzer constants.
 SKILL_FILENAME = "SKILL.md"
@@ -304,6 +354,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     add_source_arguments(scan_parser)
     add_security_arguments(scan_parser)
+    add_exclusion_arguments(scan_parser)
     add_ai_review_arguments(scan_parser)
     scan_parser.add_argument(
         "--ci",
@@ -340,6 +391,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="Install target agent (default: claude; also: cursor, codex, opencode)",
     )
     add_security_arguments(install_parser)
+    add_exclusion_arguments(install_parser)
     install_parser.add_argument(
         "--recursive",
         action="store_true",
@@ -548,6 +600,28 @@ def add_security_arguments(parser: argparse.ArgumentParser) -> None:
     )
 
 
+def add_exclusion_arguments(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--exclude",
+        action="append",
+        default=[],
+        metavar="RULE",
+        type=exclude_rule_id,
+        help="Exclude a scanner rule ID from the security verdict; repeatable",
+    )
+    parser.add_argument(
+        "--exclude-path",
+        action="append",
+        default=[],
+        metavar="GLOB",
+        type=exclude_path_pattern,
+        help=(
+            "Exclude a source-relative path or glob from scanning and installation; "
+            "repeatable"
+        ),
+    )
+
+
 def add_ai_review_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--ai-checks",
@@ -576,6 +650,27 @@ def positive_int(value: str) -> int:
     return number
 
 
+def exclude_path_pattern(value: str) -> str:
+    pattern = value.strip().replace("\\", "/")
+    while pattern.startswith("./"):
+        pattern = pattern[2:]
+    pattern = pattern.strip("/")
+    if not pattern or pattern == ".":
+        raise argparse.ArgumentTypeError("exclude path cannot be empty or the source root")
+    if any(part == ".." for part in PurePosixPath(pattern).parts):
+        raise argparse.ArgumentTypeError("exclude path cannot contain '..'")
+    return pattern
+
+
+def exclude_rule_id(value: str) -> str:
+    rule = value.strip().lower().replace("_", "-")
+    if not rule or re.fullmatch(r"[a-z0-9][a-z0-9-]*", rule) is None:
+        raise argparse.ArgumentTypeError(
+            "exclude rule must contain only lowercase letters, numbers, and hyphens"
+        )
+    return rule
+
+
 # Command runners
 
 
@@ -601,12 +696,17 @@ def run_scan_command(args: argparse.Namespace) -> int:
         result_file, result_saved = resolve_security_result_path(
             args.output, security_root
         )
-        inventory = build_security_inventory(install_root)
+        inventory = build_security_inventory(
+            install_root,
+            exclude_paths=args.exclude_path,
+        )
         print_files_to_scan(inventory)
         inventory, static_result = run_static_security_checks(
             scan_root=install_root,
             output_result_file=result_file,
             inventory=inventory,
+            exclude_rules=args.exclude,
+            exclude_paths=args.exclude_path,
         )
         print_relevant_scan_files(inventory)
         print_security_result(static_result, result_file, result_saved)
@@ -670,6 +770,8 @@ def run_scan_ci_command(args: argparse.Namespace) -> int:
             inventory, final_result = run_static_security_checks(
                 scan_root=install_root,
                 output_result_file=result_file,
+                exclude_rules=args.exclude,
+                exclude_paths=args.exclude_path,
             )
             static_safe = is_security_result_safe(final_result)
             ai_ran = ai_enabled and (static_safe or args.force_run_ai_checks)
@@ -711,6 +813,13 @@ def run_install_command(args: argparse.Namespace) -> int:
             if (install_root / SKILL_FILENAME).is_file()
             else []
         )
+        skill_roots = [
+            skill_root
+            for skill_root in skill_roots
+            if not source_path_is_excluded(
+                skill_root / SKILL_FILENAME, install_root, args.exclude_path
+            )
+        ]
         if not skill_roots:
             mode = "recursively" if args.recursive else "at the selected root"
             raise SkillInstallError(f"No SKILL.md files found {mode}: {install_root}")
@@ -719,6 +828,8 @@ def run_install_command(args: argparse.Namespace) -> int:
         inventory, static_result = run_static_security_checks(
             scan_root=install_root,
             output_result_file=result_file,
+            exclude_rules=args.exclude,
+            exclude_paths=args.exclude_path,
         )
         print_security_result(static_result, result_file, result_saved)
         static_blocked = security_result_exceeds_max_severity(
@@ -807,6 +918,8 @@ def run_install_command(args: argparse.Namespace) -> int:
             force=args.force,
             source=prepared.source,
             install_root=install_root,
+            exclude_rules=args.exclude,
+            exclude_paths=args.exclude_path,
         )
         print_install_summary(records)
     print_elapsed("Install completed", started_at)
@@ -1275,6 +1388,8 @@ def install_skills(
     force: bool,
     source: InstallSource | None = None,
     install_root: Path | None = None,
+    exclude_rules: Iterable[str] = (),
+    exclude_paths: Iterable[str] = (),
 ) -> list[InstallRecord]:
     records: list[InstallRecord] = []
     for agent in agents:
@@ -1292,9 +1407,21 @@ def install_skills(
             metadata = None
             if source is not None and install_root is not None:
                 metadata = build_install_metadata(
-                    source, install_root, skill_root, agent, destination.name
+                    source,
+                    install_root,
+                    skill_root,
+                    agent,
+                    destination.name,
+                    exclude_rules=exclude_rules,
+                    exclude_paths=exclude_paths,
                 )
-            copy_skill_tree(skill_root, destination, metadata)
+            copy_skill_tree(
+                skill_root,
+                destination,
+                metadata,
+                exclude_paths=exclude_paths,
+                exclusion_root=install_root,
+            )
             records.append(InstallRecord(agent, skill_root, destination, "installed"))
 
     return records
@@ -1318,6 +1445,8 @@ def build_install_metadata(
     skill_root: Path,
     agent: str,
     installed_name: str,
+    exclude_rules: Iterable[str] = (),
+    exclude_paths: Iterable[str] = (),
 ) -> dict[str, Any]:
     try:
         skill_relative_path = str(skill_root.relative_to(install_root))
@@ -1340,11 +1469,19 @@ def build_install_metadata(
         "skill": {
             "relative_path": skill_relative_path,
         },
+        "exclusions": {
+            "rules": deduplicate_strings(list(exclude_rules)),
+            "paths": deduplicate_strings(list(exclude_paths)),
+        },
     }
 
 
 def copy_skill_tree(
-    source: Path, destination: Path, metadata: dict[str, Any] | None = None
+    source: Path,
+    destination: Path,
+    metadata: dict[str, Any] | None = None,
+    exclude_paths: Iterable[str] = (),
+    exclusion_root: Path | None = None,
 ) -> None:
     destination.parent.mkdir(parents=True, exist_ok=True)
     temp_parent = Path(
@@ -1355,7 +1492,9 @@ def copy_skill_tree(
     temp_destination = temp_parent / destination.name
     backup_parent: Path | None = None
     try:
-        shutil.copytree(source, temp_destination, symlinks=True)
+        patterns = deduplicate_strings(list(exclude_paths))
+        ignore = copytree_exclusion_filter(exclusion_root or source, patterns)
+        shutil.copytree(source, temp_destination, symlinks=True, ignore=ignore)
         if metadata is not None:
             write_json(temp_destination / INSTALL_METADATA_FILENAME, metadata)
         if destination.exists() or destination.is_symlink():
@@ -1385,6 +1524,25 @@ def copy_skill_tree(
             # Always clean up the backup dir (its contents were either restored
             # above on failure, or the rename succeeded so the dir is now empty).
             shutil.rmtree(backup_parent, ignore_errors=True)
+
+
+def copytree_exclusion_filter(
+    exclusion_root: Path, patterns: Iterable[str]
+) -> Any:
+    root = exclusion_root.absolute()
+    exclusion_patterns = list(patterns)
+
+    def ignored_names(current: str, names: list[str]) -> set[str]:
+        current_path = Path(current)
+        return {
+            name
+            for name in names
+            if source_path_is_excluded(
+                current_path / name, root, exclusion_patterns
+            )
+        }
+
+    return ignored_names
 
 
 def check_or_apply_update(
@@ -1429,6 +1587,13 @@ def check_or_apply_update(
     source_path = source_info.get("path")
     branch = source_info.get("branch")
     relative_skill_path = str(skill_info.get("relative_path") or ".")
+    exclusion_info = metadata.get("exclusions")
+    if isinstance(exclusion_info, dict):
+        exclude_rules = string_list(exclusion_info.get("rules"))
+        exclude_paths = string_list(exclusion_info.get("paths"))
+    else:
+        exclude_rules = []
+        exclude_paths = []
 
     with prepared_source(
         source_input,
@@ -1448,7 +1613,11 @@ def check_or_apply_update(
             )
 
         inventory, static_result = run_static_security_checks(
-            candidate_root, result_file
+            candidate_root,
+            result_file,
+            exclude_rules=exclude_rules,
+            exclude_paths=exclude_paths,
+            exclusion_root=prepared.install_root,
         )
         print_security_result(static_result, result_file, result_saved)
         static_blocked = security_result_exceeds_max_severity(static_result, max_severity)
@@ -1499,7 +1668,11 @@ def check_or_apply_update(
                 f"static checks exceeded --minimum-accepted-severity {max_severity}",
             )
 
-        if directory_fingerprint(skill.path) == directory_fingerprint(candidate_root):
+        if directory_fingerprint(skill.path) == directory_fingerprint(
+            candidate_root,
+            exclude_paths=exclude_paths,
+            exclusion_root=prepared.install_root,
+        ):
             return UpdateRecord(
                 skill.agent, skill.path.name, skill.path, "current", "no changes"
             )
@@ -1519,8 +1692,16 @@ def check_or_apply_update(
             candidate_root,
             skill.agent,
             skill.path.name,
+            exclude_rules=exclude_rules,
+            exclude_paths=exclude_paths,
         )
-        copy_skill_tree(candidate_root, skill.path, metadata)
+        copy_skill_tree(
+            candidate_root,
+            skill.path,
+            metadata,
+            exclude_paths=exclude_paths,
+            exclusion_root=prepared.install_root,
+        )
         return UpdateRecord(
             skill.agent, skill.path.name, skill.path, "updated", "applied"
         )
@@ -1567,14 +1748,29 @@ def read_install_metadata(skill_path: Path) -> dict[str, Any] | None:
     return value if isinstance(value, dict) else None
 
 
-def directory_fingerprint(root: Path) -> dict[str, dict[str, Any]]:
+def directory_fingerprint(
+    root: Path,
+    exclude_paths: Iterable[str] = (),
+    exclusion_root: Path | None = None,
+) -> dict[str, dict[str, Any]]:
     fingerprint: dict[str, dict[str, Any]] = {}
+    patterns = list(exclude_paths)
+    path_match_root = (exclusion_root or root).absolute()
     for current_root, dirnames, filenames in os.walk(root):
-        dirnames[:] = sorted(dirnames)
+        current_path = Path(current_root)
+        dirnames[:] = sorted(
+            dirname
+            for dirname in dirnames
+            if not source_path_is_excluded(
+                current_path / dirname, path_match_root, patterns
+            )
+        )
         for filename in sorted(filenames):
             if filename == INSTALL_METADATA_FILENAME:
                 continue
-            path = Path(current_root) / filename
+            path = current_path / filename
+            if source_path_is_excluded(path, path_match_root, patterns):
+                continue
             rel = relative_string(path, root)
             try:
                 stat = path.lstat()
@@ -1952,10 +2148,20 @@ def run_static_security_checks(
     scan_root: Path,
     output_result_file: Path,
     inventory: dict[str, Any] | None = None,
+    exclude_rules: Iterable[str] = (),
+    exclude_paths: Iterable[str] = (),
+    exclusion_root: Path | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     print("Running static security checks.")
     if inventory is None:
-        inventory = build_security_inventory(scan_root)
+        inventory = build_security_inventory(
+            scan_root,
+            exclude_paths=exclude_paths,
+            exclusion_root=exclusion_root,
+        )
+    inventory["exclude_rules"] = deduplicate_strings(list(exclude_rules))
+    inventory["exclude_paths"] = deduplicate_strings(list(exclude_paths))
+    inventory["exclusion_root"] = str((exclusion_root or scan_root).absolute())
     result = build_static_security_result(inventory)
     try:
         output_result_file.parent.mkdir(parents=True, exist_ok=True)
@@ -1968,9 +2174,11 @@ def run_static_security_checks(
 
 
 def build_static_security_result(inventory: dict[str, Any]) -> dict[str, Any]:
-    findings = deduplicate_findings(
+    all_findings = deduplicate_findings(
         normalize_findings(inventory.get("deterministic_findings", []))
     )
+    findings = apply_security_exclusions(all_findings, inventory)
+    excluded_findings = len(all_findings) - len(findings)
     safe = not has_blocking_findings(findings)
     risk_level = risk_level_from_findings(findings)
     summary = (
@@ -1987,6 +2195,7 @@ def build_static_security_result(inventory: dict[str, Any]) -> dict[str, Any]:
         "findings": findings,
         "reviewed_at": datetime.now(timezone.utc).isoformat(),
         "file_count": inventory.get("file_count", 0),
+        "exclusions": security_exclusion_summary(inventory, excluded_findings),
     }
 
 
@@ -2104,6 +2313,14 @@ def deduplicate_strings(values: list[str]) -> list[str]:
     return unique
 
 
+def string_list(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return deduplicate_strings(
+        [str(item) for item in value if isinstance(item, str) and item]
+    )
+
+
 def format_file_size(value: Any) -> str:
     if not isinstance(value, int):
         return "-"
@@ -2117,7 +2334,11 @@ def format_file_size(value: Any) -> str:
 # Static inventory and file scanning
 
 
-def build_security_inventory(scan_root: Path) -> dict[str, Any]:
+def build_security_inventory(
+    scan_root: Path,
+    exclude_paths: Iterable[str] = (),
+    exclusion_root: Path | None = None,
+) -> dict[str, Any]:
     files: list[dict[str, Any]] = []
     findings: list[dict[str, str]] = []
     inode_paths: dict[tuple[int, int], list[str]] = {}
@@ -2125,9 +2346,18 @@ def build_security_inventory(scan_root: Path) -> dict[str, Any]:
     root_resolved = scan_root.resolve()
     total_bytes_read = 0
     scan_budget_exceeded = False
+    exclusion_patterns = deduplicate_strings(list(exclude_paths))
+    path_match_root = (exclusion_root or scan_root).absolute()
+    excluded_entries: list[str] = []
 
     for current_root, dirnames, filenames in os.walk(scan_root):
         current_path = Path(current_root)
+
+        for dirname in list(dirnames):
+            path = current_path / dirname
+            if source_path_is_excluded(path, path_match_root, exclusion_patterns):
+                dirnames.remove(dirname)
+                excluded_entries.append(relative_string(path, scan_root))
 
         depth = len(current_path.relative_to(scan_root).parts)
         if depth >= MAX_DIRECTORY_DEPTH and dirnames:
@@ -2144,6 +2374,7 @@ def build_security_inventory(scan_root: Path) -> dict[str, Any]:
         for dirname in list(dirnames):
             path = current_path / dirname
             rel = relative_string(path, scan_root)
+            persistence_kind = persistence_directory_kind(path, scan_root)
             if dirname == ".git":
                 findings.append(
                     finding(
@@ -2153,25 +2384,36 @@ def build_security_inventory(scan_root: Path) -> dict[str, Any]:
                         "Do not install skills that include embedded Git metadata; it can hide hooks, config, object data, and trust settings.",
                     )
                 )
-            if is_hidden_path(path, scan_root) and not is_git_metadata_path(
-                path, scan_root
+            if (
+                persistence_kind is None
+                and should_report_hidden_entry(path)
+                and not is_git_metadata_path(path, scan_root)
             ):
-                severity = "high" if dirname in PERSISTENCE_DIR_NAMES else "medium"
                 findings.append(
                     finding(
-                        severity,
+                        "medium",
                         rel,
                         "Hidden directory found in skill package.",
                         "Inspect hidden directories manually; they are easy places to hide agent instructions or payloads.",
                     )
                 )
-            if dirname in PERSISTENCE_DIR_NAMES:
+            if persistence_kind is not None:
+                issue = (
+                    "Git hook directory found."
+                    if persistence_kind == "git"
+                    else "Agent hook directory found."
+                )
+                recommendation = (
+                    "Require explicit approval before installing persistent Git hooks."
+                    if persistence_kind == "git"
+                    else "Review each hook event and command before installing the plugin."
+                )
                 findings.append(
                     finding(
                         "high",
                         rel,
-                        "Persistent hook directory found.",
-                        "Do not install skills that silently add git hooks or other persistent execution paths.",
+                        issue,
+                        recommendation,
                     )
                 )
             if path.is_symlink():
@@ -2180,6 +2422,9 @@ def build_security_inventory(scan_root: Path) -> dict[str, Any]:
         for filename in filenames:
             path = current_path / filename
             rel = relative_string(path, scan_root)
+            if source_path_is_excluded(path, path_match_root, exclusion_patterns):
+                excluded_entries.append(rel)
+                continue
             try:
                 stat = path.lstat()
             except OSError as exc:
@@ -2200,7 +2445,7 @@ def build_security_inventory(scan_root: Path) -> dict[str, Any]:
                 "kind": "symlink" if path.is_symlink() else "file",
             }
             if (
-                is_hidden_path(path, scan_root)
+                should_report_hidden_entry(path)
                 and not is_install_metadata_path(path, scan_root)
                 and not is_git_metadata_path(path, scan_root)
             ):
@@ -2265,6 +2510,9 @@ def build_security_inventory(scan_root: Path) -> dict[str, Any]:
         "file_count": len(files),
         "files": files,
         "deterministic_findings": findings,
+        "exclude_paths": exclusion_patterns,
+        "exclusion_root": str(path_match_root),
+        "excluded_entries": sorted(deduplicate_strings(excluded_entries)),
     }
 
 
@@ -2283,6 +2531,15 @@ def scan_file_for_security_indicators(
                 rel,
                 "Sensitive configuration filename found.",
                 "Verify no secrets are included before installing.",
+            )
+        )
+    if lower_name == ".mcp.json":
+        findings.append(
+            finding(
+                "medium",
+                rel,
+                "MCP server configuration found.",
+                "Review server commands, URLs, environment references, and trust boundaries before installing.",
             )
         )
     if lower_name in {"id_rsa", "id_dsa", "id_ecdsa", "id_ed25519"}:
@@ -2321,15 +2578,6 @@ def scan_file_for_security_indicators(
                 "Remove compiled artifacts and provide source-only, reviewable code.",
             )
         )
-    if not is_textlike_file(path):
-        findings.append(
-            finding(
-                "high",
-                rel,
-                "Non-text file type found in skill package.",
-                "Skills should be source-readable text only; remove binary and opaque asset files.",
-            )
-        )
     if suffix in ARCHIVE_SUFFIXES:
         findings.append(
             finding(
@@ -2348,13 +2596,31 @@ def scan_file_for_security_indicators(
                 "Do not use document archives as a source of executable skill instructions.",
             )
         )
+    if suffix in DOCUMENT_SUFFIXES:
+        findings.append(
+            finding(
+                "medium",
+                rel,
+                "PDF document requires manual review.",
+                "Inspect PDF text, links, scripts, and embedded content before installing the skill.",
+            )
+        )
     if suffix in IMAGE_SUFFIXES:
         findings.append(
             finding(
-                "high",
+                "medium",
                 rel,
                 "Image asset found; multimodal prompt injection is possible.",
                 "Remove binary image assets from skills unless they are source-readable text such as SVG.",
+            )
+        )
+    if suffix in FONT_SUFFIXES:
+        findings.append(
+            finding(
+                "medium",
+                rel,
+                "Binary font asset found.",
+                "Confirm the font is expected and comes from a trusted source.",
             )
         )
     if is_executable_mode(path):
@@ -2364,15 +2630,6 @@ def scan_file_for_security_indicators(
                 rel,
                 "Executable file mode is set.",
                 "Review whether the skill needs executable files before installing.",
-            )
-        )
-    if is_persistence_path(path, scan_root):
-        findings.append(
-            finding(
-                "high",
-                rel,
-                "Persistent hook or startup path found.",
-                "Do not install skills that silently add persistent execution behavior.",
             )
         )
     if size > 10_000_000:
@@ -2399,6 +2656,23 @@ def scan_file_for_security_indicators(
         )
         return findings
     if size > MAX_TEXT_SCAN_BYTES:
+        if suffix not in (
+            ARCHIVE_SUFFIXES
+            | DOCUMENT_ARCHIVE_SUFFIXES
+            | DOCUMENT_SUFFIXES
+            | IMAGE_SUFFIXES
+            | FONT_SUFFIXES
+            | BLOCKED_BYTECODE_SUFFIXES
+            | BLOCKED_NATIVE_SUFFIXES
+        ):
+            findings.append(
+                finding(
+                    "high",
+                    rel,
+                    "Unknown file type exceeds the complete-scan limit.",
+                    "Reduce the file size or use a recognized source-text format so it can be reviewed completely.",
+                )
+            )
         return findings
 
     try:
@@ -2410,7 +2684,16 @@ def scan_file_for_security_indicators(
         return findings
 
     if is_binary_content(raw):
-        if suffix not in BLOCKED_BYTECODE_SUFFIXES | BLOCKED_NATIVE_SUFFIXES:
+        known_binary_suffixes = (
+            ARCHIVE_SUFFIXES
+            | DOCUMENT_ARCHIVE_SUFFIXES
+            | DOCUMENT_SUFFIXES
+            | IMAGE_SUFFIXES
+            | FONT_SUFFIXES
+            | BLOCKED_BYTECODE_SUFFIXES
+            | BLOCKED_NATIVE_SUFFIXES
+        )
+        if suffix not in known_binary_suffixes:
             findings.append(
                 finding(
                     "high",
@@ -2431,18 +2714,6 @@ def scan_text_patterns(
 ) -> list[dict[str, str]]:
     checks: list[tuple[str, str, str, str]] = [
         (
-            "critical",
-            r"-----BEGIN (RSA |DSA |EC |OPENSSH )?PRIVATE KEY-----",
-            "Private key material found.",
-            "Remove private keys before installing.",
-        ),
-        (
-            "high",
-            r"(?i)(api[_-]?key|secret|token|password)\s*[:=]\s*['\"][^'\"]{16,}['\"]",
-            "Credential-like assignment found.",
-            "Verify this is not a real secret.",
-        ),
-        (
             "high",
             r"(?i)(curl|wget)\s+[^|;\n]+[|]\s*(sh|bash)",
             "Network script piped into a shell.",
@@ -2450,7 +2721,7 @@ def scan_text_patterns(
         ),
         (
             "high",
-            r"(?i)\brm\s+-rf\s+(/|~|\$HOME|\*)",
+            r"(?i)\brm\s+-rf\s+(?:/\*?|~(?:/\*)?|\$HOME(?:/\*)?|\*)(?=\s|$|[;)`'\"])",
             "Potentially destructive remove command found.",
             "Inspect command before installing.",
         ),
@@ -2474,30 +2745,50 @@ def scan_text_patterns(
         ),
         (
             "high",
-            r"(?i)(npm|yarn|pnpm)\s+config\s+set\s+registry|registry\s*[=:]\s*https?://|npmrc|yarnrc",
+            r"(?i)(npm|yarn|pnpm)\s+config\s+set\s+registry|(?:^|\s)registry\s*[=:]\s*https?://",
             "Package manager registry configuration found.",
             "Treat registry rewrites as unsafe unless the repository is curated and the registry is independently trusted.",
         ),
         (
             "high",
-            r"(?i)(pip\s+config\s+set|PIP_INDEX_URL|extra-index-url|index-url\s*=)",
+            r"(?i)pip\s+config\s+set|PIP_(?:EXTRA_)?INDEX_URL\s*=|(?:^|\s)(?:extra-)?index-url\s*=",
             "Python package index override found.",
             "Do not install skills that redirect package resolution without explicit trust controls.",
         ),
         (
             "high",
-            r"(?i)(core\.hooksPath|pre-commit\s+install|\.git/hooks|\.husky)",
+            r"(?i)(?:\bgit\s+(?:-C\s+\S+\s+)?config\b[^\n]*\bcore\.hooksPath\b|\bpre-commit\s+install\b)",
             "Persistent git hook configuration found.",
             "Require explicit user approval for persistent hooks; do not install silently.",
         ),
     ]
 
     findings: list[dict[str, str]] = []
-    padding_issue = padding_evasion_issue(text)
-    if padding_issue is not None:
+    if contains_private_key_material(text):
+        findings.append(
+            finding(
+                "critical",
+                rel,
+                "Private key material found.",
+                "Remove private keys before installing.",
+            )
+        )
+    if has_literal_credential_assignment(text):
         findings.append(
             finding(
                 "high",
+                rel,
+                "Credential-like assignment found.",
+                "Verify this is not a real secret.",
+            )
+        )
+
+    padding_issue = padding_evasion_issue(text)
+    if padding_issue is not None:
+        severity = "high" if "whitespace padding" in padding_issue.lower() else "medium"
+        findings.append(
+            finding(
+                severity,
                 rel,
                 padding_issue,
                 "Padding or oversized text can hide malicious content from truncated scanner contexts; inspect manually.",
@@ -2505,8 +2796,28 @@ def scan_text_patterns(
         )
 
     for severity, pattern, issue, recommendation in checks:
-        if re.search(pattern, text):
-            findings.append(finding(severity, rel, issue, recommendation))
+        finding_severity = severity
+        if issue in {
+            "Network script piped into a shell.",
+            "Potentially destructive remove command found.",
+        }:
+            command_matches = actionable_dangerous_command_matches(
+                text, pattern, rel
+            )
+            matched = bool(command_matches)
+            if (
+                matched
+                and is_test_fixture_path(rel)
+                and all(
+                    is_quoted_command_example(text, match)
+                    for match in command_matches
+                )
+            ):
+                finding_severity = "medium"
+        else:
+            matched = re.search(pattern, text) is not None
+        if matched:
+            findings.append(finding(finding_severity, rel, issue, recommendation))
 
     if lower_name in {"package.json", "pyproject.toml", "requirements.txt"}:
         findings.append(
@@ -2531,13 +2842,114 @@ def scan_text_patterns(
     if suffix in EXECUTABLE_TEXT_SUFFIXES and has_environment_access(text, suffix):
         findings.append(
             finding(
-                "high",
+                "medium",
                 rel,
                 "Environment variable access API or command found in executable code.",
                 "Review which variables are accessed and whether their values can reach network requests, subprocesses, or logs.",
             )
         )
     return findings
+
+
+def contains_private_key_material(text: str) -> bool:
+    pattern = re.compile(
+        r"-----BEGIN (?P<kind>(?:RSA |DSA |EC |OPENSSH )?)PRIVATE KEY-----"
+        r"(?P<body>.*?)"
+        r"-----END (?P=kind)PRIVATE KEY-----",
+        re.DOTALL,
+    )
+    for match in pattern.finditer(text):
+        body = match.group("body").replace(r"\n", "\n").replace(r"\r", "\r")
+        if len(re.sub(r"\s", "", body)) >= 32:
+            return True
+    return False
+
+
+def has_literal_credential_assignment(text: str) -> bool:
+    pattern = re.compile(
+        r"(?i)(?:api[_-]?key|secret|token|password)\s*[:=]\s*"
+        r"(?P<quote>['\"])(?P<value>[^'\"\r\n]{16,})(?P=quote)"
+    )
+    return any(
+        not is_placeholder_credential_value(match.group("value"))
+        for match in pattern.finditer(text)
+    )
+
+
+def is_placeholder_credential_value(value: str) -> bool:
+    normalized = value.strip().lower()
+    placeholder_markers = (
+        "${",
+        "$(",
+        "<",
+        ">",
+        "changeme",
+        "example",
+        "placeholder",
+        "redacted",
+        "replace-me",
+        "replace_me",
+        "your-",
+        "your_",
+    )
+    return normalized.startswith("$") or any(
+        marker in normalized for marker in placeholder_markers
+    )
+
+
+def actionable_dangerous_command_matches(
+    text: str, pattern: str, rel: str
+) -> list[re.Match[str]]:
+    if "denylist" in Path(rel).name.lower():
+        return []
+
+    safety_language = re.compile(
+        r"(?i)\b(?:block(?:ed)?|deny|denied|destructive|forbid(?:den)?|must not|"
+        r"never run|do not run|prohibit(?:ed)?)\b"
+    )
+    matches: list[re.Match[str]] = []
+    for match in re.finditer(pattern, text):
+        line_start = text.rfind("\n", 0, match.start())
+        previous_start = text.rfind("\n", 0, max(line_start, 0))
+        next_end = text.find("\n", match.end())
+        if next_end == -1:
+            next_end = len(text)
+        context = text[previous_start + 1 : next_end]
+        if safety_language.search(context) is None:
+            matches.append(match)
+    return matches
+
+
+def is_quoted_command_example(text: str, match: re.Match[str]) -> bool:
+    line_start = text.rfind("\n", 0, match.start()) + 1
+    line_end = text.find("\n", match.end())
+    if line_end == -1:
+        line_end = len(text)
+    prefix = text[line_start : match.start()]
+    suffix = text[match.end() : line_end]
+
+    if re.search(r"(?i)\b(?:ba|z|fi)?sh\s+-c\s*['\"][^'\"]*$", prefix):
+        return False
+    if re.search(r"(?i)\beval\s*['\"][^'\"]*$", prefix):
+        return False
+    open_quotes = [
+        prefix.rfind(quote)
+        for quote in "'\"`"
+        if prefix.count(quote) % 2 == 1 and quote in suffix
+    ]
+    if not open_quotes:
+        return False
+    if prefix.rfind("$(") > max(open_quotes):
+        return False
+    return True
+
+
+def is_test_fixture_path(rel: str) -> bool:
+    path = Path(rel)
+    parts = {part.lower() for part in path.parts}
+    return bool(parts & {"evals", "fixture", "fixtures", "test", "tests"}) or any(
+        marker in path.name.lower() for marker in (".test.", "_test.", "test_")
+    )
 
 
 def has_environment_access(text: str, suffix: str) -> bool:
@@ -2700,15 +3112,30 @@ def is_executable_mode(path: Path) -> bool:
         return False
 
 
-def is_persistence_path(path: Path, root: Path) -> bool:
+def persistence_directory_kind(path: Path, root: Path) -> str | None:
     try:
-        parts = path.relative_to(root).parts
+        relative = path.relative_to(root)
     except ValueError:
-        parts = path.parts
-    lowered = {part.lower() for part in parts}
-    return (
-        bool(lowered & PERSISTENCE_DIR_NAMES) or ".git/hooks" in "/".join(parts).lower()
-    )
+        relative = path
+
+    name = path.name.lower()
+    if name in GIT_HOOK_DIR_NAMES or (
+        name == "hooks" and path.parent.name.lower() == ".git"
+    ):
+        return "git"
+    if name != "hooks":
+        return None
+
+    if path.parent == root or (path / "hooks.json").is_file():
+        return "agent"
+    if len(relative.parts) == 1:
+        return "agent"
+    return None
+
+
+def should_report_hidden_entry(path: Path) -> bool:
+    name = path.name.lower()
+    return name.startswith(".") and name not in CONVENTIONAL_HIDDEN_NAMES
 
 
 def is_hidden_path(path: Path, root: Path) -> bool:
@@ -2794,15 +3221,6 @@ def add_symlink_finding(
         )
         return
 
-    findings.append(
-        finding(
-            "high",
-            rel,
-            "Symlink found in skill package.",
-            "Remove symlinks; skills should contain regular source-readable text files only.",
-        )
-    )
-
     if os.path.isabs(target):
         findings.append(
             finding(
@@ -2825,17 +3243,56 @@ def add_symlink_finding(
                 "Remove or replace escaping symlinks before installing.",
             )
         )
+        return
+
+    if not path.exists():
+        findings.append(
+            finding(
+                "high",
+                rel,
+                "Broken symlink found in skill package.",
+                "Replace the broken link with a reviewed file before installing.",
+            )
+        )
+        return
+
+    findings.append(
+        finding(
+            "medium",
+            rel,
+            "Internal symlink found in skill package.",
+            "Confirm the link and its in-package target are both expected.",
+        )
+    )
 
 
 def finding(
-    severity: str, path: str, issue: str, recommendation: str
+    severity: str,
+    path: str,
+    issue: str,
+    recommendation: str,
+    rule: str | None = None,
 ) -> dict[str, str]:
     return {
+        "rule": rule or finding_rule_id(issue),
         "severity": severity,
         "path": path,
         "issue": issue,
         "recommendation": recommendation,
     }
+
+
+def finding_rule_id(issue: str) -> str:
+    explicit = FINDING_RULE_IDS.get(issue)
+    if explicit:
+        return explicit
+    normalized = re.sub(r"\d+", "limit", issue.lower())
+    normalized = re.sub(r"[^a-z0-9]+", "-", normalized).strip("-")
+    for suffix in ("-found-in-skill-package", "-found", "-is-set"):
+        if normalized.endswith(suffix):
+            normalized = normalized[: -len(suffix)]
+            break
+    return normalized or "unspecified-finding"
 
 
 # AI security review
@@ -3086,9 +3543,18 @@ def extract_json_object(text: str) -> dict[str, Any] | None:
 def normalize_security_result(
     result: dict[str, Any], inventory: dict[str, Any]
 ) -> dict[str, Any]:
-    findings = normalize_findings(result.get("findings", []))
+    ai_findings = normalize_findings(result.get("findings", []))
+    included_ai_findings = apply_security_exclusions(ai_findings, inventory)
+    excluded_blocking_ai_findings = has_blocking_findings(
+        ai_findings
+    ) and not has_blocking_findings(included_ai_findings)
+
+    findings = list(ai_findings)
     findings.extend(normalize_findings(inventory.get("deterministic_findings", [])))
     findings = deduplicate_findings(findings)
+    unfiltered_count = len(findings)
+    findings = apply_security_exclusions(findings, inventory)
+    excluded_findings = unfiltered_count - len(findings)
 
     safe_value = result.get("safe")
     if not isinstance(safe_value, bool):
@@ -3098,12 +3564,14 @@ def normalize_security_result(
     normalized = {
         "schema_version": RESULT_SCHEMA_VERSION,
         "review_type": "ai",
-        "safe": safe_value,
+        "safe": safe_value
+        or (excluded_blocking_ai_findings and not has_blocking_findings(findings)),
         "risk_level": risk_level,
         "summary": str(result.get("summary") or "Security review completed."),
         "findings": findings,
         "reviewed_at": datetime.now(timezone.utc).isoformat(),
         "file_count": inventory.get("file_count", 0),
+        "exclusions": security_exclusion_summary(inventory, excluded_findings),
     }
 
     if has_blocking_findings(findings):
@@ -3117,6 +3585,43 @@ def normalize_security_result(
     return normalized
 
 
+def apply_security_exclusions(
+    findings: list[dict[str, str]], inventory: dict[str, Any]
+) -> list[dict[str, str]]:
+    excluded_rules = {
+        str(rule) for rule in inventory.get("exclude_rules", []) if str(rule)
+    }
+    exclude_paths = [
+        str(pattern) for pattern in inventory.get("exclude_paths", []) if str(pattern)
+    ]
+    scan_root = Path(str(inventory.get("root") or "."))
+    exclusion_root = Path(str(inventory.get("exclusion_root") or scan_root))
+
+    included: list[dict[str, str]] = []
+    for item in findings:
+        if item["rule"] in excluded_rules:
+            continue
+        finding_path = item["path"].split("!/", 1)[0]
+        if exclude_paths and source_path_is_excluded(
+            scan_root / finding_path, exclusion_root, exclude_paths
+        ):
+            continue
+        included.append(item)
+    return included
+
+
+def security_exclusion_summary(
+    inventory: dict[str, Any], excluded_findings: int
+) -> dict[str, Any]:
+    excluded_entries = inventory.get("excluded_entries", [])
+    return {
+        "rules": list(inventory.get("exclude_rules", [])),
+        "paths": list(inventory.get("exclude_paths", [])),
+        "excluded_findings": excluded_findings,
+        "excluded_entries": len(excluded_entries) if isinstance(excluded_entries, list) else 0,
+    }
+
+
 def normalize_findings(value: Any) -> list[dict[str, str]]:
     if not isinstance(value, list):
         return []
@@ -3128,12 +3633,17 @@ def normalize_findings(value: Any) -> list[dict[str, str]]:
         severity = str(item.get("severity") or "medium").lower()
         if severity not in {"low", "medium", "high", "critical"}:
             severity = "medium"
+        issue = str(item.get("issue") or "Unspecified issue.")
+        rule = str(item.get("rule") or "").strip().lower().replace("_", "-")
+        if re.fullmatch(r"[a-z0-9][a-z0-9-]*", rule) is None:
+            rule = finding_rule_id(issue)
         normalized.append(
             finding(
                 severity,
                 str(item.get("path") or "."),
-                str(item.get("issue") or "Unspecified issue."),
+                issue,
                 str(item.get("recommendation") or "Inspect manually."),
+                rule,
             )
         )
     return normalized
@@ -3143,7 +3653,7 @@ def deduplicate_findings(findings: list[dict[str, str]]) -> list[dict[str, str]]
     seen: set[tuple[str, str, str]] = set()
     unique: list[dict[str, str]] = []
     for item in findings:
-        key = (item["severity"], item["path"], item["issue"])
+        key = (item["severity"], item["path"], item["rule"])
         if key in seen:
             continue
         seen.add(key)
@@ -3224,7 +3734,7 @@ def print_security_inputs(
             key=lambda finding_item: -risk_rank(finding_item["severity"]),
         ):
             tag = paint(f"[{item['severity'].upper()}]", severity_color(item["severity"]))
-            print(f"- {tag} {item['path']}: {item['issue']}")
+            print(f"- {tag} {item['path']}: {item['issue']} [{item['rule']}]")
             if item["recommendation"]:
                 print(paint(f"  Recommendation: {item['recommendation']}", "dim"))
     else:
@@ -3257,6 +3767,15 @@ def print_security_result(
     summary = result.get("summary")
     if summary:
         print(f"Summary: {summary}")
+    exclusions = result.get("exclusions")
+    if isinstance(exclusions, dict) and (
+        exclusions.get("rules") or exclusions.get("paths")
+    ):
+        print(
+            "Exclusions: "
+            f"{exclusions.get('excluded_findings', 0)} finding(s), "
+            f"{exclusions.get('excluded_entries', 0)} source path(s) excluded"
+        )
 
     findings = normalize_findings(result.get("findings", []))
     if not findings:
@@ -3268,7 +3787,7 @@ def print_security_result(
         findings, key=lambda finding_item: -risk_rank(finding_item["severity"])
     ):
         tag = paint(f"[{item['severity'].upper()}]", severity_color(item["severity"]))
-        print(f"- {tag} {item['path']}: {item['issue']}")
+        print(f"- {tag} {item['path']}: {item['issue']} [{item['rule']}]")
         if item["recommendation"]:
             print(paint(f"  Recommendation: {item['recommendation']}", "dim"))
 
@@ -3297,7 +3816,8 @@ def print_ci_security_result(
         )
     for item in sorted(findings, key=lambda f: -risk_rank(f["severity"])):
         print(
-            f"skills-manager: [{item['severity'].upper()}] {item['path']}: {item['issue']}",
+            f"skills-manager: [{item['severity'].upper()}] {item['path']}: "
+            f"{item['issue']} [{item['rule']}]",
             file=sys.stderr,
         )
         if item["recommendation"]:
@@ -3315,6 +3835,9 @@ def print_ci_security_result(
         "ai_skipped": ai_skipped,
         "source": source,
     }
+    exclusions = result.get("exclusions")
+    if isinstance(exclusions, dict):
+        verdict["exclusions"] = exclusions
     print(json.dumps(verdict, sort_keys=True))
 
 
@@ -3419,6 +3942,53 @@ def relative_string(path: Path, root: Path) -> str:
         return str(path.relative_to(root))
     except ValueError:
         return str(path)
+
+
+def source_path_is_excluded(
+    path: Path, exclusion_root: Path, patterns: Iterable[str]
+) -> bool:
+    try:
+        relative = path.relative_to(exclusion_root).as_posix()
+    except ValueError:
+        return False
+    return path_matches_exclusion(relative, patterns)
+
+
+def path_matches_exclusion(relative_path: str, patterns: Iterable[str]) -> bool:
+    path = PurePosixPath(relative_path.strip("/"))
+    if not path.parts:
+        return False
+    prefixes = [
+        PurePosixPath(*path.parts[:index]).as_posix()
+        for index in range(1, len(path.parts) + 1)
+    ]
+    return any(
+        re.fullmatch(exclusion_glob_regex(pattern), prefix) is not None
+        for pattern in patterns
+        for prefix in prefixes
+    )
+
+
+def exclusion_glob_regex(pattern: str) -> str:
+    regex: list[str] = []
+    index = 0
+    while index < len(pattern):
+        if pattern.startswith("**/", index):
+            regex.append(r"(?:.*/)?")
+            index += 3
+        elif pattern.startswith("**", index):
+            regex.append(r".*")
+            index += 2
+        elif pattern[index] == "*":
+            regex.append(r"[^/]*")
+            index += 1
+        elif pattern[index] == "?":
+            regex.append(r"[^/]")
+            index += 1
+        else:
+            regex.append(re.escape(pattern[index]))
+            index += 1
+    return "".join(regex)
 
 
 # Context-cost analysis

@@ -9,11 +9,12 @@ WHEEL := $(DIST_DIR)/agentic_skills_manager-$(VERSION)-py3-none-any.whl
 
 .DEFAULT_GOAL := help
 
-.PHONY: help version release-tools verify-version test clean build check smoke release publish-test publish
+.PHONY: help version dev-install release-tools verify-version test clean build check smoke release publish-test publish
 
 help:
 	@printf '%s\n' \
-		'Skills Manager release commands:' \
+		'Skills Manager development and release commands:' \
+		'  make dev-install   Install this checkout in editable mode' \
 		'  make test          Run the standard-library test suite' \
 		'  make build         Build a clean source archive and wheel' \
 		'  make check         Build and validate both distributions' \
@@ -25,6 +26,9 @@ help:
 
 version:
 	@printf '%s\n' '$(VERSION)'
+
+dev-install: verify-version
+	$(PYTHON) -m pip install --editable .
 
 release-tools:
 	$(PYTHON) -m pip install --upgrade build twine

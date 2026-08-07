@@ -6,6 +6,30 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+## [1.0.2] - 2026-08-06
+
+### Added
+
+- Add repeatable `--exclude RULE` and `--exclude-path GLOB` controls to scan and install, with stable rule IDs in text and JSON findings.
+- Preserve install exclusions in `.skills-install.json` and reapply them during update checks and installation.
+- Add `make dev-install` for editable local development installs.
+
+### Changed
+
+- Scan additional source and text-like formats, including unknown UTF-8 files, while classifying known binary and document assets separately.
+- Report hidden entries, persistence directories, executable modes, and symlinks at clearer package-relative boundaries.
+
+### Fixed
+
+- Reduce false positives from quoted dangerous-command examples, inert test fixtures, placeholder credentials, documentation-only registry and hook mentions, conventional metadata, and source directories named `hooks`.
+- Distinguish internal symlinks from links that escape the selected source tree.
+- Detect JSON-escaped and encrypted private keys, literal credentials, actionable destructive commands, and actual registry or persistent-hook configuration.
+
+### Security
+
+- Apply path exclusions before inventory and installation so excluded content is neither scanned nor copied.
+- Include exclusion details and suppressed-finding counts in normalized security results for auditable policy exceptions.
+
 ## [1.0.1] - 2026-08-06
 
 ### Added
@@ -58,6 +82,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 - Inspect ZIP-compatible archives for path traversal, embedded executables, hidden configuration, compiled payloads, and excessive contents.
 - Run AI reviewers in restricted agent-specific sandboxes and merge their findings without allowing an AI verdict to override a deterministic block.
 
-[Unreleased]: https://github.com/mazen160/skills-manager/compare/v1.0.1...HEAD
+[Unreleased]: https://github.com/mazen160/skills-manager/compare/v1.0.2...HEAD
+[1.0.2]: https://github.com/mazen160/skills-manager/compare/v1.0.1...v1.0.2
 [1.0.1]: https://github.com/mazen160/skills-manager/compare/v1.0.0...v1.0.1
 [1.0.0]: https://github.com/mazen160/skills-manager/releases/tag/v1.0.0

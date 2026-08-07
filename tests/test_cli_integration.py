@@ -186,6 +186,54 @@ class ScanCiModeTests(unittest.TestCase):
         self.assertIsInstance(result, dict)
 
 
+class ScanExclusionTests(unittest.TestCase):
+    def test_scan_can_exclude_a_rule(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            skill_dir = _make_skill_dir(Path(tmp), "hook-skill")
+            hooks = skill_dir / ".githooks"
+            hooks.mkdir()
+            hook = hooks / "pre-commit"
+            hook.write_text("#!/bin/sh\ntrue\n", encoding="utf-8")
+            hook.chmod(0o755)
+            output = Path(tmp) / "result.json"
+
+            blocked, _, _ = _run_main("scan", str(skill_dir))
+            allowed, _, _ = _run_main(
+                "scan",
+                str(skill_dir),
+                "--exclude",
+                "git-hook-directory",
+                "--output",
+                str(output),
+            )
+
+            result = json.loads(output.read_text(encoding="utf-8"))
+        self.assertNotEqual(blocked, 0)
+        self.assertEqual(allowed, 0)
+        self.assertEqual(result["exclusions"]["rules"], ["git-hook-directory"])
+        self.assertEqual(result["exclusions"]["excluded_findings"], 1)
+
+    def test_scan_can_exclude_a_path(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            skill_dir = _make_skill_dir(Path(tmp), "path-skill")
+            (skill_dir / "payload.pyc").write_bytes(b"\x00payload")
+            output = Path(tmp) / "result.json"
+
+            rc, _, _ = _run_main(
+                "scan",
+                str(skill_dir),
+                "--exclude-path",
+                "payload.pyc",
+                "--output",
+                str(output),
+            )
+
+            result = json.loads(output.read_text(encoding="utf-8"))
+        self.assertEqual(rc, 0)
+        self.assertEqual(result["exclusions"]["paths"], ["payload.pyc"])
+        self.assertEqual(result["exclusions"]["excluded_entries"], 1)
+
+
 # ---------------------------------------------------------------------------
 # Install / list / uninstall lifecycle
 # ---------------------------------------------------------------------------
@@ -288,6 +336,44 @@ class InstallLifecycleTests(unittest.TestCase):
         self.assertIn("skill", metadata)
         self.assertEqual(metadata["source"]["kind"], "local")
 
+    def test_install_rule_exclusion_keeps_matching_content(self) -> None:
+        source = self._skill_source("rule-excluded-skill")
+        hooks = source / ".githooks"
+        hooks.mkdir()
+        hook = hooks / "pre-commit"
+        hook.write_text("#!/bin/sh\ntrue\n", encoding="utf-8")
+        hook.chmod(0o755)
+
+        rc, _, stderr = _run_main(
+            "install", str(source), "--exclude", "git-hook-directory"
+        )
+
+        installed = skills.agent_skill_dir("claude") / "rule-excluded-skill"
+        self.assertEqual(rc, 0, stderr)
+        self.assertTrue((installed / ".githooks" / "pre-commit").is_file())
+        metadata = json.loads(
+            (installed / skills.INSTALL_METADATA_FILENAME).read_text(encoding="utf-8")
+        )
+        self.assertEqual(
+            metadata["exclusions"]["rules"], ["git-hook-directory"]
+        )
+
+    def test_install_path_exclusion_does_not_copy_matching_content(self) -> None:
+        source = self._skill_source("path-excluded-skill")
+        (source / "payload.pyc").write_bytes(b"\x00payload")
+
+        rc, _, stderr = _run_main(
+            "install", str(source), "--exclude-path", "payload.pyc"
+        )
+
+        installed = skills.agent_skill_dir("claude") / "path-excluded-skill"
+        self.assertEqual(rc, 0, stderr)
+        self.assertFalse((installed / "payload.pyc").exists())
+        metadata = json.loads(
+            (installed / skills.INSTALL_METADATA_FILENAME).read_text(encoding="utf-8")
+        )
+        self.assertEqual(metadata["exclusions"]["paths"], ["payload.pyc"])
+
     def test_install_skips_existing_without_force(self) -> None:
         source = self._skill_source("existing-skill")
         rc1, out1, _ = _run_main("install", str(source))
@@ -368,6 +454,30 @@ class UpdateLifecycleTests(unittest.TestCase):
         self.assertTrue(
             "up-to-date" in stdout.lower() or "no changes" in stdout.lower() or "unchanged" in stdout.lower(),
             f"Expected up-to-date/no-changes/unchanged in output: {stdout}",
+        )
+
+    def test_update_preserves_install_path_exclusions(self) -> None:
+        source = _make_skill_dir(self.tmp / "sources", "excluded-update-skill")
+        (source / "payload.pyc").write_bytes(b"\x00payload")
+        install_rc, _, install_stderr = _run_main(
+            "install", str(source), "--exclude-path", "payload.pyc"
+        )
+        self.assertEqual(install_rc, 0, install_stderr)
+
+        (source / "SKILL.md").write_text(
+            _skill_md("excluded-update-skill", "Updated description."),
+            encoding="utf-8",
+        )
+        update_rc, _, update_stderr = _run_main(
+            "update", "excluded-update-skill", "--apply"
+        )
+
+        installed = skills.agent_skill_dir("claude") / "excluded-update-skill"
+        self.assertEqual(update_rc, 0, update_stderr)
+        self.assertFalse((installed / "payload.pyc").exists())
+        self.assertIn(
+            "Updated description",
+            (installed / "SKILL.md").read_text(encoding="utf-8"),
         )
 
 
