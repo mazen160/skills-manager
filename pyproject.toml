@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "agentic-skills-manager"
-version = "1.0.0"
+version = "1.0.1"
 description = "Skills Manager: scan, install, update, and analyze AI agent skills safely across Claude, Cursor, Codex, and OpenCode."
 readme = "README.md"
 requires-python = ">=3.9"

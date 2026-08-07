@@ -384,7 +384,7 @@ Packaging and contributor instructions live in [CONTRIBUTING.md](https://github.
 
 ## Project status
 
-Skills Manager 1.0.0 is available on [PyPI](https://pypi.org/project/agentic-skills-manager/). CI tests it on Python 3.9 through 3.13.
+Skills Manager 1.0.1 is available on [PyPI](https://pypi.org/project/agentic-skills-manager/). CI tests it on Python 3.9 through 3.13.
 
 ## Troubleshooting
 

@@ -31,7 +31,7 @@ from urllib.parse import unquote, urlparse
 # Constants, branding, and terminal output
 
 
-__version__ = "1.0.0"
+__version__ = "1.0.1"
 SUPPORTED_AGENTS = ("claude", "cursor", "codex", "opencode")
 AGENT_ALIASES = {
     "claude": "claude",
