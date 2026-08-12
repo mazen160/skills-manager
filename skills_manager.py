@@ -31,7 +31,7 @@ from urllib.parse import unquote, urlparse
 # Constants, branding, and terminal output
 
 
-__version__ = "1.0.3"
+__version__ = "1.0.4"
 SUPPORTED_AGENTS = ("claude", "cursor", "codex", "opencode")
 AGENT_ALIASES = {
     "claude": "claude",
@@ -3837,7 +3837,16 @@ def print_ci_security_result(
         "review_type": review_type,
         "safe": safe,
         "risk_level": risk,
-        "findings": len(findings),
+        "findings": [
+            {
+                "severity": f["severity"],
+                "path": f["path"],
+                "rule": f["rule"],
+                "issue": f["issue"],
+                "recommendation": f["recommendation"],
+            }
+            for f in sorted(findings, key=lambda f: -risk_rank(f["severity"]))
+        ],
         "ai_skipped": ai_skipped,
         "source": source,
     }
