@@ -291,6 +291,17 @@ class BlobUrlParsingTests(unittest.TestCase):
         with self.assertRaises(skills.SkillInstallError):
             skills.blob_file_path_to_skill_dir(None, "url")
 
+    def test_blob_directory_url_uses_path_directly(self) -> None:
+        # /blob/main/skills/csv-summarizer (no file extension) → sparse_path = "skills/csv-summarizer"
+        source = self._parse("https://github.com/owner/repo/blob/main/skills/csv-summarizer")
+        self.assertEqual(source.sparse_path, "skills/csv-summarizer")
+        self.assertEqual(source.branch, "main")
+
+    def test_blob_root_directory_url_returns_none(self) -> None:
+        # /blob/main/myskill where myskill has no extension → sparse_path = "myskill"
+        source = self._parse("https://github.com/owner/repo/blob/main/myskill")
+        self.assertEqual(source.sparse_path, "myskill")
+
     def test_unsupported_path_type_raises(self) -> None:
         with self.assertRaises(skills.SkillInstallError):
             self._parse("https://github.com/owner/repo/commit/abc123")

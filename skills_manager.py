@@ -31,7 +31,7 @@ from urllib.parse import unquote, urlparse
 # Constants, branding, and terminal output
 
 
-__version__ = "1.0.2"
+__version__ = "1.0.3"
 SUPPORTED_AGENTS = ("claude", "cursor", "codex", "opencode")
 AGENT_ALIASES = {
     "claude": "claude",
@@ -1282,15 +1282,21 @@ def resolve_tree_branch_and_path(
 
 
 def blob_file_path_to_skill_dir(file_path: str | None, raw_url: str) -> str | None:
-    """Convert a blob file path (relative to repo root) to the parent directory path.
+    """Convert a blob path (relative to repo root) to the skill directory path.
 
-    Returns None when the file is at the repo root (sparse_path=None means clone root).
+    If the last component looks like a file (contains '.'), the skill root is its
+    parent directory.  If it has no extension, the URL points to a directory and
+    the path is used directly.  Returns None when the result is the repo root.
     Raises SkillInstallError when no file path component is present.
     """
     if file_path is None:
         raise SkillInstallError(
             f"GitHub blob URL has no file path after the branch: {raw_url}"
         )
+    last = file_path.split("/")[-1]
+    if "." not in last:
+        # Directory URL (e.g. /blob/main/skills/csv-summarizer) — use path directly
+        return file_path or None
     parent = "/".join(file_path.split("/")[:-1])
     return parent or None
 
