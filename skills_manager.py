@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import ast
 import hashlib
 import io
 import json
@@ -14,18 +15,20 @@ import shutil
 import signal
 import subprocess
 import sys
+import tarfile
 import tempfile
 import textwrap
 import time
 import tokenize
+import unicodedata
 import zipfile
 from collections import Counter
 from contextlib import contextmanager, redirect_stdout
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
-from typing import Any, Iterable, Iterator
-from urllib.parse import unquote, urlparse
+from typing import Any, Callable, Iterable, Iterator
+from urllib.parse import quote, unquote, urlparse
 
 
 # Constants, branding, and terminal output
@@ -92,14 +95,17 @@ def render_banner(stream: Any = None) -> str:
 
 
 INSTALL_METADATA_FILENAME = ".skills-install.json"
-RESULT_SCHEMA_VERSION = 1
+RESULT_SCHEMA_VERSION = 2
 MAX_TEXT_SCAN_BYTES = 1_000_000
 MAX_TEXT_REVIEW_LINES = 2_000
 AVERAGE_REVIEW_CHARS_PER_LINE = 70
 MAX_TEXT_REVIEW_CHARS = AVERAGE_REVIEW_CHARS_PER_LINE * MAX_TEXT_REVIEW_LINES
+MAX_EXTERNAL_RULE_TEXT = 200_000
 MAX_INVENTORY_FILES = 5000
 MAX_RELEVANT_FILE_DISPLAY = 80
 MAX_ZIP_MEMBERS = 1000
+MAX_ARCHIVE_DEPTH = 3
+MAX_ARCHIVE_EXPANDED_BYTES = 128 * 1024 * 1024
 MAX_ARCHIVE_MEMBER_BYTES = 100 * 1024 * 1024  # 100 MB uncompressed per member
 MAX_COMPRESSION_RATIO = 100  # flag probable zip-bomb entries
 MAX_SCAN_BYTES_TOTAL = 512 * 1024 * 1024  # 512 MB total bytes hashed/read per scan
@@ -207,6 +213,98 @@ FINDING_RULE_IDS = {
     "Private key material found.": "private-key-material",
 }
 
+SEVERITIES = ("low", "medium", "high", "critical")
+BUILTIN_POLICY_PROFILES: dict[str, dict[str, Any]] = {
+    "strict": {
+        "severity_overrides": {
+            "dependency-manifest": "medium",
+            "environment-access": "high",
+            "pii-harvesting": "high",
+        },
+        "disabled_rules": [],
+        "disabled_analyzers": [],
+        "trusted_domains": [],
+        "thresholds": {"unicode_zero_width_min": 1, "reference_depth": 12, "archive_depth": 2},
+    },
+    "balanced": {
+        "severity_overrides": {},
+        "disabled_rules": [],
+        "disabled_analyzers": [],
+        "trusted_domains": [],
+        "thresholds": {"unicode_zero_width_min": 2, "reference_depth": 16, "archive_depth": 3},
+    },
+    "permissive": {
+        "severity_overrides": {
+            "dependency-manifest": "low",
+            "environment-access": "low",
+            "pii-harvesting": "medium",
+        },
+        "disabled_rules": [],
+        "disabled_analyzers": [],
+        "trusted_domains": [],
+        "thresholds": {"unicode_zero_width_min": 2, "reference_depth": 16, "archive_depth": 3},
+    },
+}
+
+UNICODE_BIDI_CONTROLS = {
+    "\u061c",
+    "\u200e",
+    "\u200f",
+    "\u202a",
+    "\u202b",
+    "\u202c",
+    "\u202d",
+    "\u202e",
+    "\u2066",
+    "\u2067",
+    "\u2068",
+    "\u2069",
+}
+UNICODE_ZERO_WIDTH = {"\u200b", "\u200c", "\u200d", "\u2060", "\ufeff"}
+DEPENDENCY_MANIFEST_NAMES = {
+    "requirements.txt",
+    "pyproject.toml",
+    "setup.py",
+    "setup.cfg",
+    "pipfile",
+    "package.json",
+}
+DEPENDENCY_LOCKFILES = {
+    "package.json": {"package-lock.json", "npm-shrinkwrap.json", "yarn.lock", "pnpm-lock.yaml"},
+    "pipfile": {"pipfile.lock"},
+    "pyproject.toml": {"poetry.lock", "uv.lock", "pdm.lock"},
+    "requirements.txt": {"uv.lock"},
+    "setup.py": {"uv.lock"},
+    "setup.cfg": {"uv.lock"},
+}
+CROSS_SKILL_COMMON_DOMAINS = {
+    "github.com",
+    "raw.githubusercontent.com",
+    "pypi.org",
+    "files.pythonhosted.org",
+    "npmjs.com",
+    "registry.npmjs.org",
+}
+SECRET_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
+    ("AWS access key", re.compile(r"\b(?:AKIA|ASIA)[A-Z0-9]{16}\b")),
+    ("OpenAI API key", re.compile(r"\bsk-(?:proj-|svcacct-)?[A-Za-z0-9_-]{20,}\b")),
+    ("Anthropic API key", re.compile(r"\bsk-ant-[A-Za-z0-9_-]{20,}\b")),
+    ("GitHub token", re.compile(r"\b(?:gh[oprsu]_[A-Za-z0-9_]{30,255}|github_pat_[A-Za-z0-9_]{40,255})\b")),
+    ("GitLab token", re.compile(r"\bglpat-[A-Za-z0-9_-]{20,}\b")),
+    ("Slack token", re.compile(r"\bxox[baprs]-[A-Za-z0-9-]{20,}\b")),
+    ("Hugging Face token", re.compile(r"\bhf_[A-Za-z0-9]{20,}\b")),
+    ("npm token", re.compile(r"\bnpm_[A-Za-z0-9]{36,}\b")),
+    ("PyPI token", re.compile(r"\bpypi-AgEIcHlwaS5vcmc[A-Za-z0-9_-]{40,}\b")),
+    ("SendGrid API key", re.compile(r"\bSG\.[A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{20,}\b")),
+    ("Discord token", re.compile(r"\b[MN][A-Za-z0-9_-]{22,}\.[A-Za-z0-9_-]{6}\.[A-Za-z0-9_-]{25,}\b")),
+    ("DigitalOcean token", re.compile(r"\bdop_v1_[A-Fa-f0-9]{64}\b")),
+    ("Azure storage key", re.compile(r"\bAccountKey=[A-Za-z0-9+/]{40,}={0,2}")),
+    ("Google API key", re.compile(r"\bAIza[0-9A-Za-z_-]{35}\b")),
+    ("Stripe secret key", re.compile(r"\bsk_(?:live|test)_[0-9A-Za-z]{16,}\b")),
+    ("Slack webhook", re.compile(r"https://hooks\.slack\.com/services/[A-Za-z0-9/_-]{30,}")),
+    ("Discord webhook", re.compile(r"https://(?:discord(?:app)?\.com)/api/webhooks/[0-9]+/[A-Za-z0-9_-]{20,}")),
+)
+
 # Analyzer constants.
 SKILL_FILENAME = "SKILL.md"
 LOAD_MODE_LABELS = {
@@ -298,6 +396,42 @@ class SecurityAgentInvocation:
     stdin: str | None
 
 
+@dataclass(frozen=True)
+class RuleDefinition:
+    rule_id: str
+    title: str
+    category: str
+    default_severity: str
+    analyzer: str
+
+
+@dataclass(frozen=True)
+class ScanPolicy:
+    name: str
+    severity_overrides: dict[str, str]
+    disabled_rules: frozenset[str]
+    disabled_analyzers: frozenset[str]
+    trusted_domains: frozenset[str]
+    thresholds: dict[str, int]
+    fingerprint: str
+
+
+@dataclass
+class ArchiveBudget:
+    members: int = 0
+    expanded_bytes: int = 0
+
+
+@dataclass(frozen=True)
+class AnalyzerDefinition:
+    name: str
+    description: str
+    scanner: Callable[
+        [str, str, str, str, ScanPolicy, Iterable[dict[str, Any]]],
+        list[dict[str, Any]],
+    ]
+
+
 class SkillInstallError(Exception):
     """User-facing installation failure."""
 
@@ -306,6 +440,136 @@ class SkillInstallError(Exception):
 Finding = dict[str, Any]
 FileUsage = dict[str, Any]
 SkillReport = dict[str, Any]
+
+
+RULE_REGISTRY: dict[str, RuleDefinition] = {}
+ANALYZER_REGISTRY: dict[str, AnalyzerDefinition] = {}
+
+
+def register_rule(
+    rule_id: str,
+    title: str,
+    category: str,
+    default_severity: str,
+    analyzer: str,
+) -> None:
+    if rule_id in RULE_REGISTRY:
+        raise RuntimeError(f"duplicate scanner rule ID: {rule_id}")
+    RULE_REGISTRY[rule_id] = RuleDefinition(
+        rule_id, title, category, default_severity, analyzer
+    )
+
+
+for _rule in (
+    ("unicode-control-character", "Unicode control character", "obfuscation", "high", "unicode"),
+    ("unicode-tag-block-smuggling", "Unicode Tag Block smuggling", "obfuscation", "critical", "unicode"),
+    ("unicode-bidi-control", "Bidirectional Unicode control", "obfuscation", "high", "unicode"),
+    ("unicode-zero-width-sequence", "Suspicious zero-width sequence", "obfuscation", "high", "unicode"),
+    ("unicode-mixed-script", "Mixed-script identifier", "obfuscation", "medium", "unicode"),
+    ("unicode-normalization-collision", "Unicode normalization collision", "obfuscation", "high", "unicode"),
+    ("deceptive-path", "Deceptive path", "obfuscation", "high", "unicode"),
+    ("shell-tainted-pipeline", "Remote or decoded data reaches a shell", "execution", "high", "pipeline"),
+    ("unpinned-dependency", "Unpinned dependency", "supply-chain", "medium", "dependencies"),
+    ("dependency-manifest", "Dependency manifest", "supply-chain", "low", "dependencies"),
+    ("dependency-manifest-invalid", "Invalid dependency manifest", "supply-chain", "high", "dependencies"),
+    ("mutable-dependency-source", "Mutable dependency source", "supply-chain", "high", "dependencies"),
+    ("reference-outside-root", "Reference escapes skill root", "references", "high", "references"),
+    ("remote-instruction-reference", "Remote instruction delegation", "references", "high", "references"),
+    ("reference-cycle", "Reference cycle", "references", "medium", "references"),
+    ("provider-secret", "Provider credential", "secrets", "critical", "secrets-exfiltration"),
+    ("pii-harvesting", "Bulk PII harvesting", "privacy", "medium", "secrets-exfiltration"),
+    ("markdown-exfiltration", "Markdown-based data exfiltration", "exfiltration", "high", "secrets-exfiltration"),
+    ("raw-pii-value", "Raw personally identifying value", "privacy", "high", "secrets-exfiltration"),
+    ("file-type-mismatch", "File type mismatch", "payload", "high", "file-magic"),
+    ("focused-python-taint", "Python source-to-sink flow", "execution", "high", "behavioral"),
+    ("focused-shell-taint", "Shell source-to-sink flow", "execution", "high", "behavioral"),
+    ("behavioral-analysis-incomplete", "Incomplete behavioral analysis", "scanner", "medium", "behavioral"),
+    ("invalid-skill-manifest", "Invalid skill manifest", "manifest", "high", "manifest"),
+    ("allowed-tools-violation", "Allowed-tools contract violation", "capability", "high", "manifest"),
+    ("cross-skill-payload-splitting", "Cross-skill payload splitting", "collection", "high", "cross-skill"),
+    ("cross-skill-secret-flow", "Cross-skill secret flow", "collection", "high", "cross-skill"),
+    ("cross-skill-shared-domain", "Cross-skill suspicious shared domain", "collection", "high", "cross-skill"),
+    ("archive-member-symlink", "Archive member symlink", "archive", "critical", "archive"),
+    ("analyzer-failure", "Analyzer failure", "scanner", "high", "orchestrator"),
+    ("external-signature", "External signature", "custom", "medium", "external"),
+):
+    register_rule(*_rule)
+
+
+def register_analyzer(definition: AnalyzerDefinition) -> None:
+    if definition.name in ANALYZER_REGISTRY:
+        raise RuntimeError(f"duplicate scanner analyzer: {definition.name}")
+    ANALYZER_REGISTRY[definition.name] = definition
+
+
+def ensure_analyzer_registry() -> None:
+    if ANALYZER_REGISTRY:
+        return
+    register_analyzer(
+        AnalyzerDefinition(
+            "patterns",
+            "Deterministic command, persistence, and shell-pipeline signatures",
+            lambda text, rel, lower_name, suffix, policy, rules: scan_text_patterns(
+                text, rel, lower_name, suffix
+            ),
+        )
+    )
+    register_analyzer(
+        AnalyzerDefinition(
+            "unicode",
+            "Unicode control and mixed-script analysis",
+            lambda text, rel, lower_name, suffix, policy, rules: scan_unicode_content(
+                text,
+                rel,
+                zero_width_min=policy.thresholds.get("unicode_zero_width_min", 2),
+            ),
+        )
+    )
+    register_analyzer(
+        AnalyzerDefinition(
+            "pipeline",
+            "Quote-aware multi-stage shell source-to-sink analysis",
+            lambda text, rel, lower_name, suffix, policy, rules: scan_shell_pipeline_taint(
+                text, rel, suffix
+            ),
+        )
+    )
+    register_analyzer(
+        AnalyzerDefinition(
+            "dependencies",
+            "Dependency pinning and mutable-source analysis",
+            lambda text, rel, lower_name, suffix, policy, rules: scan_dependency_manifest(
+                text, rel, lower_name
+            ),
+        )
+    )
+    register_analyzer(
+        AnalyzerDefinition(
+            "secrets-exfiltration",
+            "Provider-secret, privacy, and Markdown exfiltration analysis",
+            lambda text, rel, lower_name, suffix, policy, rules: scan_provider_secrets_and_exfiltration(
+                text, rel, suffix, policy
+            ),
+        )
+    )
+    register_analyzer(
+        AnalyzerDefinition(
+            "behavioral",
+            "Focused Python AST and shell source-to-sink analysis",
+            lambda text, rel, lower_name, suffix, policy, rules: scan_behavioral_flows(
+                text, rel, suffix
+            ),
+        )
+    )
+    register_analyzer(
+        AnalyzerDefinition(
+            "external",
+            "Validated external signature packs",
+            lambda text, rel, lower_name, suffix, policy, rules: scan_external_signatures(
+                text, rel, suffix, rules
+            ),
+        )
+    )
 
 
 # CLI entry point and argument parser
@@ -360,6 +624,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--ci",
         action="store_true",
         help="CI mode: suppress decorative output, print findings to stderr and a machine-readable verdict (JSON) to stdout, exit non-zero when unsafe",
+    )
+    scan_parser.add_argument(
+        "--cross-skill",
+        action="store_true",
+        help="Correlate behavior across every nested directory containing SKILL.md",
     )
     scan_parser.set_defaults(handler=run_scan_command)
 
@@ -598,6 +867,24 @@ def add_security_arguments(parser: argparse.ArgumentParser) -> None:
         action="store_true",
         help="Print the full AI prompt and deterministic inventory when --ai-checks is used",
     )
+    parser.add_argument(
+        "--policy",
+        default="balanced",
+        metavar="PROFILE_OR_PATH",
+        help="Scanner policy: strict, balanced, permissive, or a JSON policy path",
+    )
+    parser.add_argument(
+        "--rules-file",
+        action="append",
+        default=[],
+        metavar="PATH",
+        help="Load a versioned external JSON signature pack; repeatable",
+    )
+    parser.add_argument(
+        "--sarif",
+        metavar="PATH",
+        help="Also write the final result as SARIF 2.1.0",
+    )
 
 
 def add_exclusion_arguments(parser: argparse.ArgumentParser) -> None:
@@ -671,6 +958,257 @@ def exclude_rule_id(value: str) -> str:
     return rule
 
 
+def config_rule_id(value: str) -> str:
+    try:
+        return exclude_rule_id(value)
+    except argparse.ArgumentTypeError as exc:
+        raise SkillInstallError(str(exc)) from exc
+
+
+def load_scan_policy(value: str | None) -> ScanPolicy:
+    requested = (value or "balanced").strip()
+    if requested in BUILTIN_POLICY_PROFILES:
+        raw: dict[str, Any] = dict(BUILTIN_POLICY_PROFILES[requested])
+        name = requested
+    else:
+        path = resolve_existing_config_path(requested, "policy")
+        raw = read_json_object(path, "scanner policy")
+        name = str(raw.get("name") or path.stem)
+        unknown = set(raw) - {
+            "version",
+            "name",
+            "extends",
+            "severity_overrides",
+            "disabled_rules",
+            "disabled_analyzers",
+            "trusted_domains",
+            "thresholds",
+        }
+        if unknown:
+            raise SkillInstallError(
+                f"Scanner policy has unsupported fields: {', '.join(sorted(unknown))}"
+            )
+        if raw.get("version", 1) != 1:
+            raise SkillInstallError("Scanner policy version must be 1")
+        base_name = str(raw.get("extends") or "balanced")
+        if base_name not in BUILTIN_POLICY_PROFILES:
+            raise SkillInstallError(
+                "Scanner policy extends must be strict, balanced, or permissive"
+            )
+        merged = dict(BUILTIN_POLICY_PROFILES[base_name])
+        merged["severity_overrides"] = {
+            **dict(merged.get("severity_overrides", {})),
+            **dict(raw.get("severity_overrides", {})),
+        }
+        merged["disabled_rules"] = list(raw.get("disabled_rules", []))
+        merged["disabled_analyzers"] = list(raw.get("disabled_analyzers", []))
+        merged["trusted_domains"] = list(raw.get("trusted_domains", []))
+        merged["thresholds"] = {
+            **dict(merged.get("thresholds", {})),
+            **dict(raw.get("thresholds", {})),
+        }
+        raw = merged
+
+    overrides: dict[str, str] = {}
+    override_value = raw.get("severity_overrides", {})
+    if not isinstance(override_value, dict):
+        raise SkillInstallError("Policy severity_overrides must be an object")
+    for rule_id, severity in override_value.items():
+        normalized_rule = config_rule_id(str(rule_id))
+        normalized_severity = str(severity).lower()
+        if normalized_severity not in SEVERITIES:
+            raise SkillInstallError(
+                f"Invalid severity override for {normalized_rule}: {severity}"
+            )
+        definition = RULE_REGISTRY.get(normalized_rule)
+        if (
+            definition
+            and definition.default_severity in {"high", "critical"}
+            and risk_rank(normalized_severity) < risk_rank(definition.default_severity)
+        ):
+            raise SkillInstallError(
+                f"Policy cannot lower blocking rule {normalized_rule} below "
+                f"{definition.default_severity}"
+            )
+        overrides[normalized_rule] = normalized_severity
+
+    disabled_value = raw.get("disabled_rules", [])
+    if not isinstance(disabled_value, list):
+        raise SkillInstallError("Policy disabled_rules must be a list")
+    disabled: set[str] = set()
+    for value_item in disabled_value:
+        rule_id = config_rule_id(str(value_item))
+        definition = RULE_REGISTRY.get(rule_id)
+        if definition and definition.default_severity in {"high", "critical"}:
+            raise SkillInstallError(
+                f"Policy cannot disable blocking deterministic rule {rule_id}"
+            )
+        disabled.add(rule_id)
+
+    disabled_analyzers_value = raw.get("disabled_analyzers", [])
+    if not isinstance(disabled_analyzers_value, list):
+        raise SkillInstallError("Policy disabled_analyzers must be a list")
+    ensure_analyzer_registry()
+    disabled_analyzers: set[str] = set()
+    blocking_analyzers = {
+        definition.analyzer
+        for definition in RULE_REGISTRY.values()
+        if definition.default_severity in {"high", "critical"}
+    }
+    for analyzer_value in disabled_analyzers_value:
+        analyzer = str(analyzer_value).strip().casefold()
+        if analyzer not in ANALYZER_REGISTRY:
+            raise SkillInstallError(f"Unknown scanner analyzer: {analyzer}")
+        if analyzer in blocking_analyzers:
+            raise SkillInstallError(
+                f"Policy cannot disable blocking deterministic analyzer {analyzer}"
+            )
+        disabled_analyzers.add(analyzer)
+
+    domains_value = raw.get("trusted_domains", [])
+    if not isinstance(domains_value, list):
+        raise SkillInstallError("Policy trusted_domains must be a list")
+    domains = {
+        str(domain).strip().lower().rstrip(".")
+        for domain in domains_value
+        if str(domain).strip()
+    }
+    for domain in domains:
+        if re.fullmatch(r"[a-z0-9.-]+", domain) is None or ".." in domain:
+            raise SkillInstallError(f"Invalid trusted domain: {domain}")
+
+    thresholds_value = raw.get("thresholds", {})
+    if not isinstance(thresholds_value, dict):
+        raise SkillInstallError("Policy thresholds must be an object")
+    threshold_limits = {
+        "unicode_zero_width_min": (1, 2),
+        "reference_depth": (1, 16),
+        "archive_depth": (1, MAX_ARCHIVE_DEPTH),
+    }
+    thresholds: dict[str, int] = {}
+    for threshold, raw_threshold in thresholds_value.items():
+        if threshold not in threshold_limits or not isinstance(raw_threshold, int):
+            raise SkillInstallError(f"Unsupported or invalid scanner threshold: {threshold}")
+        minimum, maximum = threshold_limits[threshold]
+        if not minimum <= raw_threshold <= maximum:
+            raise SkillInstallError(
+                f"Scanner threshold {threshold} must be between {minimum} and {maximum}"
+            )
+        thresholds[threshold] = raw_threshold
+
+    fingerprint_payload = json.dumps(
+        {
+            "name": name,
+            "severity_overrides": overrides,
+            "disabled_rules": sorted(disabled),
+            "disabled_analyzers": sorted(disabled_analyzers),
+            "trusted_domains": sorted(domains),
+            "thresholds": thresholds,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return ScanPolicy(
+        name=name,
+        severity_overrides=overrides,
+        disabled_rules=frozenset(disabled),
+        disabled_analyzers=frozenset(disabled_analyzers),
+        trusted_domains=frozenset(domains),
+        thresholds=thresholds,
+        fingerprint=hashlib.sha256(fingerprint_payload.encode()).hexdigest(),
+    )
+
+
+def resolve_existing_config_path(value: str, kind: str) -> Path:
+    path = Path(value).expanduser()
+    if not path.is_absolute():
+        path = Path.cwd() / path
+    if not path.is_file():
+        raise SkillInstallError(f"{kind.title()} file not found: {path}")
+    return path
+
+
+def read_json_object(path: Path, label: str) -> dict[str, Any]:
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise SkillInstallError(f"Could not read {label} {path}: {exc}") from exc
+    if not isinstance(value, dict):
+        raise SkillInstallError(f"{label.title()} must contain a JSON object: {path}")
+    return value
+
+
+def load_external_rule_packs(paths: Iterable[str]) -> list[dict[str, Any]]:
+    rules: list[dict[str, Any]] = []
+    seen = set(RULE_REGISTRY)
+    for raw_path in paths:
+        path = resolve_existing_config_path(raw_path, "rule pack")
+        pack = read_json_object(path, "rule pack")
+        if pack.get("version") != 1 or not isinstance(pack.get("rules"), list):
+            raise SkillInstallError(
+                f"Rule pack {path} must use version 1 and contain a rules list"
+            )
+        pack_id = config_rule_id(str(pack.get("id") or path.stem))
+        for index, value in enumerate(pack["rules"]):
+            if not isinstance(value, dict):
+                raise SkillInstallError(f"Rule pack {pack_id} rule {index} must be an object")
+            unknown_rule_fields = set(value) - {
+                "id",
+                "severity",
+                "pattern",
+                "issue",
+                "recommendation",
+                "category",
+                "suffixes",
+                "paths",
+                "exclude_paths",
+            }
+            if unknown_rule_fields:
+                raise SkillInstallError(
+                    f"External rule has unsupported fields: {', '.join(sorted(unknown_rule_fields))}"
+                )
+            rule_id = config_rule_id(str(value.get("id") or ""))
+            if rule_id in seen:
+                raise SkillInstallError(f"Duplicate scanner rule ID: {rule_id}")
+            severity = str(value.get("severity") or "medium").lower()
+            pattern = str(value.get("pattern") or "")
+            if severity not in SEVERITIES:
+                raise SkillInstallError(f"Invalid severity for external rule {rule_id}")
+            if not pattern or len(pattern) > 500:
+                raise SkillInstallError(
+                    f"External rule {rule_id} pattern must contain 1 to 500 characters"
+                )
+            if re.search(r"\([^)]*[+*][^)]*\)[+*{]", pattern):
+                raise SkillInstallError(
+                    f"External rule {rule_id} uses a potentially unsafe nested quantifier"
+                )
+            try:
+                compiled = re.compile(pattern, re.IGNORECASE | re.MULTILINE)
+            except re.error as exc:
+                raise SkillInstallError(f"Invalid regex for external rule {rule_id}: {exc}") from exc
+            for list_field in ("suffixes", "paths", "exclude_paths"):
+                if list_field in value and not isinstance(value[list_field], list):
+                    raise SkillInstallError(
+                        f"External rule {rule_id} field {list_field} must be a list"
+                    )
+            seen.add(rule_id)
+            rules.append(
+                {
+                    "rule": rule_id,
+                    "severity": severity,
+                    "pattern": compiled,
+                    "issue": str(value.get("issue") or f"External signature {rule_id} matched."),
+                    "recommendation": str(value.get("recommendation") or "Review this custom policy match."),
+                    "category": str(value.get("category") or "custom"),
+                    "suffixes": tuple(str(item).lower() for item in value.get("suffixes", []) if isinstance(item, str)),
+                    "paths": tuple(str(item) for item in value.get("paths", []) if isinstance(item, str)),
+                    "exclude_paths": tuple(str(item) for item in value.get("exclude_paths", []) if isinstance(item, str)),
+                    "pack": pack_id,
+                }
+            )
+    return rules
+
+
 # Command runners
 
 
@@ -696,9 +1234,14 @@ def run_scan_command(args: argparse.Namespace) -> int:
         result_file, result_saved = resolve_security_result_path(
             args.output, security_root
         )
+        policy = load_scan_policy(args.policy)
+        external_rules = load_external_rule_packs(args.rules_file)
         inventory = build_security_inventory(
             install_root,
             exclude_paths=args.exclude_path,
+            policy=policy,
+            external_rules=external_rules,
+            cross_skill=args.cross_skill,
         )
         print_files_to_scan(inventory)
         inventory, static_result = run_static_security_checks(
@@ -707,7 +1250,11 @@ def run_scan_command(args: argparse.Namespace) -> int:
             inventory=inventory,
             exclude_rules=args.exclude,
             exclude_paths=args.exclude_path,
+            policy_name=args.policy,
+            rule_pack_files=args.rules_file,
+            cross_skill=args.cross_skill,
         )
+        write_optional_sarif(args.sarif, static_result)
         print_relevant_scan_files(inventory)
         print_security_result(static_result, result_file, result_saved)
         static_safe = is_security_result_safe(static_result)
@@ -743,6 +1290,7 @@ def run_scan_command(args: argparse.Namespace) -> int:
                 inventory=inventory,
                 show_inputs=args.show_ai_inputs,
             )
+            write_optional_sarif(args.sarif, ai_result)
             print_security_result(ai_result, result_file, result_saved)
             if not is_security_result_safe(ai_result):
                 print_elapsed("Scan completed", started_at)
@@ -772,7 +1320,11 @@ def run_scan_ci_command(args: argparse.Namespace) -> int:
                 output_result_file=result_file,
                 exclude_rules=args.exclude,
                 exclude_paths=args.exclude_path,
+                policy_name=args.policy,
+                rule_pack_files=args.rules_file,
+                cross_skill=args.cross_skill,
             )
+            write_optional_sarif(args.sarif, final_result)
             static_safe = is_security_result_safe(final_result)
             ai_ran = ai_enabled and (static_safe or args.force_run_ai_checks)
             if ai_ran:
@@ -785,6 +1337,7 @@ def run_scan_ci_command(args: argparse.Namespace) -> int:
                     inventory=inventory,
                     show_inputs=False,
                 )
+                write_optional_sarif(args.sarif, final_result)
 
     print_ci_security_result(
         final_result, source=args.source, ai_skipped=ai_enabled and not ai_ran
@@ -830,7 +1383,11 @@ def run_install_command(args: argparse.Namespace) -> int:
             output_result_file=result_file,
             exclude_rules=args.exclude,
             exclude_paths=args.exclude_path,
+            policy_name=args.policy,
+            rule_pack_files=args.rules_file,
+            cross_skill=args.recursive,
         )
+        write_optional_sarif(args.sarif, static_result)
         print_security_result(static_result, result_file, result_saved)
         static_blocked = security_result_exceeds_max_severity(
             static_result, args.max_severity
@@ -882,6 +1439,7 @@ def run_install_command(args: argparse.Namespace) -> int:
                 inventory=inventory,
                 show_inputs=args.show_ai_inputs,
             )
+            write_optional_sarif(args.sarif, ai_result)
             print_security_result(ai_result, result_file, result_saved)
             if security_result_exceeds_max_severity(ai_result, args.max_severity):
                 if args.unsafe:
@@ -964,6 +1522,9 @@ def run_update_command(args: argparse.Namespace) -> int:
                     result_file=result_file,
                     result_saved=result_saved,
                     show_ai_inputs=args.show_ai_inputs,
+                    policy_name=args.policy,
+                    rule_pack_files=args.rules_file,
+                    sarif_path=args.sarif,
                 )
             except SkillInstallError as exc:
                 record = UpdateRecord(
@@ -1562,6 +2123,9 @@ def check_or_apply_update(
     result_file: Path,
     result_saved: bool,
     show_ai_inputs: bool,
+    policy_name: str = "balanced",
+    rule_pack_files: Iterable[str] = (),
+    sarif_path: str | None = None,
 ) -> UpdateRecord:
     metadata = read_install_metadata(skill.path)
     if metadata is None:
@@ -1624,7 +2188,10 @@ def check_or_apply_update(
             exclude_rules=exclude_rules,
             exclude_paths=exclude_paths,
             exclusion_root=prepared.install_root,
+            policy_name=policy_name,
+            rule_pack_files=rule_pack_files,
         )
+        write_optional_sarif(sarif_path, static_result)
         print_security_result(static_result, result_file, result_saved)
         static_blocked = security_result_exceeds_max_severity(static_result, max_severity)
         if static_blocked and not force_run_ai_checks:
@@ -1655,6 +2222,7 @@ def check_or_apply_update(
                 inventory=inventory,
                 show_inputs=show_ai_inputs,
             )
+            write_optional_sarif(sarif_path, ai_result)
             print_security_result(ai_result, result_file, result_saved)
             if security_result_exceeds_max_severity(ai_result, max_severity):
                 return UpdateRecord(
@@ -2157,17 +2725,37 @@ def run_static_security_checks(
     exclude_rules: Iterable[str] = (),
     exclude_paths: Iterable[str] = (),
     exclusion_root: Path | None = None,
+    policy_name: str = "balanced",
+    rule_pack_files: Iterable[str] = (),
+    cross_skill: bool = False,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     print("Running static security checks.")
+    policy = load_scan_policy(policy_name)
+    external_rules = load_external_rule_packs(rule_pack_files)
     if inventory is None:
         inventory = build_security_inventory(
             scan_root,
             exclude_paths=exclude_paths,
             exclusion_root=exclusion_root,
+            policy=policy,
+            external_rules=external_rules,
+            cross_skill=cross_skill,
         )
     inventory["exclude_rules"] = deduplicate_strings(list(exclude_rules))
     inventory["exclude_paths"] = deduplicate_strings(list(exclude_paths))
     inventory["exclusion_root"] = str((exclusion_root or scan_root).absolute())
+    inventory["policy"] = {
+        "name": policy.name,
+        "fingerprint": policy.fingerprint,
+        "severity_overrides": policy.severity_overrides,
+        "disabled_rules": sorted(policy.disabled_rules),
+        "disabled_analyzers": sorted(policy.disabled_analyzers),
+        "trusted_domains": sorted(policy.trusted_domains),
+        "thresholds": policy.thresholds,
+    }
+    inventory["rule_packs"] = sorted(
+        {str(rule.get("pack")) for rule in external_rules if rule.get("pack")}
+    )
     result = build_static_security_result(inventory)
     try:
         output_result_file.parent.mkdir(parents=True, exist_ok=True)
@@ -2202,6 +2790,9 @@ def build_static_security_result(inventory: dict[str, Any]) -> dict[str, Any]:
         "reviewed_at": datetime.now(timezone.utc).isoformat(),
         "file_count": inventory.get("file_count", 0),
         "exclusions": security_exclusion_summary(inventory, excluded_findings),
+        "policy": inventory.get("policy", {}),
+        "analyzers": inventory.get("analyzers", {}),
+        "collection": inventory.get("collection", {}),
     }
 
 
@@ -2220,7 +2811,7 @@ def print_files_to_scan(inventory: dict[str, Any]) -> None:
     )
     print(f"Files to Scan: {inventory.get('file_count', len(paths))}")
     for path in paths[:MAX_RELEVANT_FILE_DISPLAY]:
-        print(paint(f"- {path}", "dim"))
+        print(paint(f"- {safe_path_display(path)}", "dim"))
     hidden = len(paths) - MAX_RELEVANT_FILE_DISPLAY
     if hidden > 0:
         print(paint(f"... {hidden} more file(s) hidden", "dim"))
@@ -2244,7 +2835,7 @@ def print_relevant_scan_files(inventory: dict[str, Any]) -> None:
         reasons = relevant_file_reasons(item, finding_paths)
         if not path or not reasons:
             continue
-        rows.append((path, format_file_size(item.get("size")), ", ".join(reasons)))
+        rows.append((safe_path_display(path), format_file_size(item.get("size")), ", ".join(reasons)))
 
     print(f"Scanned files: {inventory.get('file_count', len(files))}")
     if not rows:
@@ -2344,7 +2935,12 @@ def build_security_inventory(
     scan_root: Path,
     exclude_paths: Iterable[str] = (),
     exclusion_root: Path | None = None,
+    policy: ScanPolicy | None = None,
+    external_rules: Iterable[dict[str, Any]] = (),
+    cross_skill: bool = False,
 ) -> dict[str, Any]:
+    policy = policy or load_scan_policy("balanced")
+    external_rule_list = list(external_rules)
     files: list[dict[str, Any]] = []
     findings: list[dict[str, str]] = []
     inode_paths: dict[tuple[int, int], list[str]] = {}
@@ -2355,6 +2951,8 @@ def build_security_inventory(
     exclusion_patterns = deduplicate_strings(list(exclude_paths))
     path_match_root = (exclusion_root or scan_root).absolute()
     excluded_entries: list[str] = []
+    normalized_paths: dict[str, list[str]] = {}
+    analyzer_state: dict[str, Any] = {"used": set(), "failed": [], "skipped": set()}
 
     for current_root, dirnames, filenames in os.walk(scan_root):
         current_path = Path(current_root)
@@ -2380,6 +2978,8 @@ def build_security_inventory(
         for dirname in list(dirnames):
             path = current_path / dirname
             rel = relative_string(path, scan_root)
+            findings.extend(scan_path_for_unicode(rel))
+            normalized_paths.setdefault(unicodedata.normalize("NFKC", rel).casefold(), []).append(rel)
             persistence_kind = persistence_directory_kind(path, scan_root)
             if dirname == ".git":
                 findings.append(
@@ -2431,6 +3031,8 @@ def build_security_inventory(
             if source_path_is_excluded(path, path_match_root, exclusion_patterns):
                 excluded_entries.append(rel)
                 continue
+            findings.extend(scan_path_for_unicode(rel))
+            normalized_paths.setdefault(unicodedata.normalize("NFKC", rel).casefold(), []).append(rel)
             try:
                 stat = path.lstat()
             except OSError as exc:
@@ -2490,7 +3092,14 @@ def build_security_inventory(
                 total_bytes_read += stat.st_size
                 item["sha256"] = sha256_file(path)
                 findings.extend(
-                    scan_file_for_security_indicators(path, scan_root, stat.st_size)
+                    scan_file_for_security_indicators(
+                        path,
+                        scan_root,
+                        stat.st_size,
+                        policy=policy,
+                        external_rules=external_rule_list,
+                        analyzer_state=analyzer_state,
+                    )
                 )
 
             files.append(item)
@@ -2508,6 +3117,18 @@ def build_security_inventory(
             break
 
     findings.extend(build_hardlink_findings(inode_paths, inode_link_counts))
+    findings = apply_dependency_lockfile_context(findings, files)
+    findings.extend(build_unicode_collision_findings(normalized_paths))
+    findings.extend(scan_skill_references(scan_root, files, policy))
+    findings.extend(scan_skill_manifest_contract(scan_root, files))
+    collection: dict[str, Any] = {}
+    if cross_skill:
+        collection, collection_findings = scan_cross_skill_collection(
+            scan_root, files, policy
+        )
+        findings.extend(collection_findings)
+
+    findings = apply_policy_to_findings(findings, policy)
 
     return {
         "schema_version": RESULT_SCHEMA_VERSION,
@@ -2519,12 +3140,484 @@ def build_security_inventory(
         "exclude_paths": exclusion_patterns,
         "exclusion_root": str(path_match_root),
         "excluded_entries": sorted(deduplicate_strings(excluded_entries)),
+        "policy": {
+            "name": policy.name,
+            "fingerprint": policy.fingerprint,
+            "severity_overrides": policy.severity_overrides,
+            "disabled_rules": sorted(policy.disabled_rules),
+            "disabled_analyzers": sorted(policy.disabled_analyzers),
+            "trusted_domains": sorted(policy.trusted_domains),
+            "thresholds": policy.thresholds,
+        },
+        "analyzers": {
+            "used": sorted(
+                set(analyzer_state["used"])
+                | {"inventory", "file-magic", "references", "manifest", "archive"}
+                | ({"cross-skill"} if cross_skill else set())
+            ),
+            "failed": analyzer_state["failed"],
+            "skipped": sorted(analyzer_state["skipped"]),
+        },
+        "collection": collection,
     }
 
 
+def readable_inventory_paths(scan_root: Path, files: list[dict[str, Any]]) -> list[Path]:
+    paths: list[Path] = []
+    for item in files:
+        if item.get("kind") != "file":
+            continue
+        relative = item.get("path")
+        if not isinstance(relative, str):
+            continue
+        path = scan_root / relative
+        if is_textlike_file(path) and int(item.get("size") or 0) <= MAX_TEXT_SCAN_BYTES:
+            paths.append(path)
+    return paths
+
+
+def reference_targets(text: str) -> list[tuple[str, int, bool]]:
+    targets: list[tuple[str, int, bool]] = []
+    for match in MARKDOWN_LINK_RE.finditer(text):
+        target = clean_markdown_target(match.group(1))
+        if target:
+            targets.append((target, text.count("\n", 0, match.start()) + 1, False))
+    instruction_pattern = re.compile(
+        r"(?im)\b(?:read|load|follow|include|import|obey|use)\b[^\n]{0,100}?"
+        r"((?:https?://[^\s`'\"<>]+|(?:\.\.?/|/)?[A-Za-z0-9_.-]+"
+        r"(?:/[A-Za-z0-9_.-]+)*\.(?:md|mdx|txt|json|ya?ml|toml|rst|adoc)"
+        r"(?:#[^\s`'\"<>]+)?))"
+    )
+    for match in instruction_pattern.finditer(text):
+        targets.append((match.group(1).rstrip(".,);]"), text.count("\n", 0, match.start()) + 1, True))
+    return targets
+
+
+def domain_is_trusted(domain: str, policy: ScanPolicy) -> bool:
+    normalized = domain.lower().rstrip(".")
+    return any(
+        normalized == trusted or normalized.endswith(f".{trusted}")
+        for trusted in policy.trusted_domains
+    )
+
+
+def scan_skill_references(
+    scan_root: Path, files: list[dict[str, Any]], policy: ScanPolicy
+) -> list[dict[str, Any]]:
+    root_resolved = scan_root.resolve()
+    findings: list[dict[str, Any]] = []
+    graph: dict[str, set[str]] = {}
+    available = {
+        relative_string(path.resolve(), root_resolved).replace("\\", "/"): path
+        for path in readable_inventory_paths(scan_root, files)
+    }
+    for rel, path in available.items():
+        try:
+            text = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeError):
+            continue
+        for raw_target, line, instructional in reference_targets(text):
+            parsed = urlparse(raw_target)
+            if parsed.scheme in {"http", "https"}:
+                if instructional and not domain_is_trusted(parsed.hostname or "", policy):
+                    findings.append(
+                        finding(
+                            "high",
+                            rel,
+                            "Skill delegates instructions to mutable remote content.",
+                            "Vendor and review the referenced instructions or trust an explicitly pinned source.",
+                            "remote-instruction-reference",
+                            line=line,
+                            metadata={"domain": (parsed.hostname or "").lower()},
+                        )
+                    )
+                continue
+            if parsed.scheme or raw_target.startswith("#"):
+                continue
+            target_text = unquote(raw_target.split("#", 1)[0].split("?", 1)[0])
+            if not target_text:
+                continue
+            target = Path(target_text)
+            if target.is_absolute():
+                findings.append(
+                    finding(
+                        "high",
+                        rel,
+                        "Local instruction reference uses an absolute filesystem path.",
+                        "Use a contained relative reference inside the reviewed skill directory.",
+                        "reference-outside-root",
+                        line=line,
+                        metadata={"target": safe_path_display(target_text)[:200]},
+                    )
+                )
+                continue
+            candidate = path.parent / target
+            try:
+                resolved = candidate.resolve(strict=False)
+                resolved.relative_to(root_resolved)
+            except (OSError, ValueError):
+                findings.append(
+                    finding(
+                        "high",
+                        rel,
+                        "Local instruction reference resolves outside the skill root.",
+                        "Keep every referenced instruction inside the reviewed skill directory.",
+                        "reference-outside-root",
+                        line=line,
+                        metadata={"target": safe_path_display(target_text)[:200]},
+                    )
+                )
+                continue
+            target_rel = relative_string(resolved, root_resolved).replace("\\", "/")
+            if target_rel in available:
+                graph.setdefault(rel, set()).add(target_rel)
+
+    visiting: list[str] = []
+    visited: set[str] = set()
+    max_reference_depth = policy.thresholds.get("reference_depth", 16)
+
+    def visit(node: str, depth: int) -> None:
+        if depth > max_reference_depth:
+            findings.append(
+                finding(
+                    "high",
+                    node,
+                    "Instruction reference graph exceeds the recursion depth limit.",
+                    "Flatten or shorten recursive instruction references.",
+                    "reference-cycle",
+                    metadata={"depth": depth, "limit": max_reference_depth},
+                )
+            )
+            return
+        if node in visiting:
+            cycle = visiting[visiting.index(node) :] + [node]
+            findings.append(
+                finding(
+                    "medium",
+                    node,
+                    "Instruction reference cycle found.",
+                    "Remove the cycle so reviewers and agents have a finite instruction graph.",
+                    "reference-cycle",
+                    metadata={"cycle": cycle[:20]},
+                )
+            )
+            return
+        if node in visited:
+            return
+        visiting.append(node)
+        for target in sorted(graph.get(node, set())):
+            visit(target, depth + 1)
+        visiting.pop()
+        visited.add(node)
+
+    for node in sorted(graph):
+        visit(node, 0)
+    return deduplicate_findings(findings)
+
+
+def parse_allowed_tools(value: str) -> set[str]:
+    normalized = value.strip().strip("[]")
+    tools: set[str] = set()
+    for token in re.split(r"[,\s]+", normalized):
+        if not token or token in {"-", "|", ">"}:
+            continue
+        lowered = token.casefold().strip("'\"")
+        tools.add(lowered)
+        tools.add(lowered.split("(", 1)[0])
+    return tools
+
+
+def infer_skill_capabilities(skill_root: Path) -> set[str]:
+    capabilities: set[str] = set()
+    for current_root, dirnames, filenames in os.walk(skill_root):
+        current_path = Path(current_root)
+        dirnames[:] = [
+            name
+            for name in dirnames
+            if name not in DEFAULT_SKIP_DIRS
+            and not (current_path / name / SKILL_FILENAME).is_file()
+        ]
+        for filename in filenames:
+            path = Path(current_root) / filename
+            suffix = path.suffix.lower()
+            try:
+                if path.stat().st_size > MAX_TEXT_SCAN_BYTES or not is_textlike_file(path):
+                    continue
+                text = path.read_text(encoding="utf-8")
+            except (OSError, UnicodeError):
+                continue
+            if suffix in {".sh", ".bash", ".zsh", ".fish", ".ps1", ".cmd", ".bat"} or re.search(r"\b(?:subprocess\.|os\.system\(|child_process|eval\(|exec\()", text):
+                capabilities.add("bash")
+            if re.search(r"https?://|\b(?:curl|wget|requests\.|fetch\()", text, re.IGNORECASE):
+                capabilities.update({"webfetch", "network"})
+            if re.search(r"(?i)\b(?:write_text|write_bytes|open\([^\n]+,['\"](?:w|a)|tee\b|>\s*[^&])", text):
+                capabilities.add("write")
+            if MARKDOWN_LINK_RE.search(text) or re.search(r"\b(?:read_text|read_bytes|open\()", text):
+                capabilities.add("read")
+            if re.search(r"(?im)(?:^|\s)(?:rg|grep|find)\s+|\b(?:glob|rglob)\s*\(", text):
+                capabilities.add("search")
+            if re.search(r"(?i)\bmcp(?:__|\.)[a-z0-9_-]+", text):
+                capabilities.add("mcp")
+    return capabilities
+
+
+def scan_skill_manifest_contract(
+    scan_root: Path, files: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    findings: list[dict[str, Any]] = []
+    manifest_paths = [
+        scan_root / str(item["path"])
+        for item in files
+        if item.get("kind") == "file" and Path(str(item.get("path"))).name == SKILL_FILENAME
+    ]
+    for manifest in manifest_paths:
+        rel = relative_string(manifest, scan_root)
+        try:
+            text = manifest.read_text(encoding="utf-8")
+        except (OSError, UnicodeError) as exc:
+            findings.append(
+                finding(
+                    "high",
+                    rel,
+                    f"Skill manifest cannot be read: {exc}",
+                    "Provide a UTF-8 SKILL.md with valid front matter.",
+                    "invalid-skill-manifest",
+                )
+            )
+            continue
+        metadata, parse_findings, has_front_matter = parse_front_matter(text)
+        errors: list[str] = []
+        if not has_front_matter:
+            errors.append("front matter is missing")
+        if parse_findings:
+            errors.append("front matter is malformed")
+        name = metadata.get("name", "").strip()
+        description = metadata.get("description", "").strip()
+        if not name or re.fullmatch(r"[a-z0-9][a-z0-9-]{0,63}", name) is None:
+            errors.append("name must be a lowercase hyphenated identifier")
+        if not description or len(description) > 1024:
+            errors.append("description must contain 1 to 1024 characters")
+        if errors:
+            findings.append(
+                finding(
+                    "high",
+                    rel,
+                    "Skill manifest is invalid: " + "; ".join(errors) + ".",
+                    "Fix the SKILL.md front matter before installation.",
+                    "invalid-skill-manifest",
+                    metadata={"errors": errors},
+                )
+            )
+        if "allowed-tools" in metadata:
+            allowed = parse_allowed_tools(metadata["allowed-tools"])
+            observed = infer_skill_capabilities(manifest.parent)
+            aliases = {
+                "shell": "bash",
+                "web": "webfetch",
+                "http": "network",
+                "filesystem-read": "read",
+                "filesystem-write": "write",
+            }
+            allowed |= {aliases[value] for value in list(allowed) if value in aliases}
+            undeclared = sorted(observed - allowed)
+            if undeclared:
+                findings.append(
+                    finding(
+                        "high",
+                        rel,
+                        "Skill behavior exceeds its allowed-tools declaration.",
+                        "Declare every required capability or remove the undeclared behavior.",
+                        "allowed-tools-violation",
+                        metadata={"allowed": sorted(allowed), "observed_undeclared": undeclared},
+                    )
+                )
+    return findings
+
+
+def closest_skill_root(path: str, skill_roots: list[str]) -> str | None:
+    matches = [
+        root
+        for root in skill_roots
+        if root == "." or path == root or path.startswith(f"{root}/")
+    ]
+    return max(matches, key=len) if matches else None
+
+
+def scan_cross_skill_collection(
+    scan_root: Path, files: list[dict[str, Any]], policy: ScanPolicy | None = None
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    policy = policy or load_scan_policy("balanced")
+    skill_roots = sorted(
+        {
+            str(Path(str(item["path"])).parent).replace("\\", "/")
+            for item in files
+            if item.get("kind") == "file" and Path(str(item.get("path"))).name == SKILL_FILENAME
+        }
+    )
+    if len(skill_roots) < 2:
+        return {"enabled": True, "skill_count": len(skill_roots), "skills": skill_roots}, []
+    profiles: dict[str, dict[str, Any]] = {
+        root: {
+            "sources": False,
+            "sinks": False,
+            "decoders": False,
+            "mentions": set(),
+            "domains": set(),
+            "files": 0,
+        }
+        for root in skill_roots
+    }
+    skill_name_map: dict[str, set[str]] = {}
+    for root in skill_roots:
+        skill_name_map.setdefault(Path(root).name.casefold(), set()).add(root)
+    known_skill_names = set(skill_name_map)
+    for item in files:
+        rel = str(item.get("path") or "")
+        owner = closest_skill_root(rel, skill_roots)
+        if owner is None or item.get("kind") != "file":
+            continue
+        profiles[owner]["files"] += 1
+        path = scan_root / rel
+        try:
+            if int(item.get("size") or 0) > MAX_TEXT_SCAN_BYTES or not is_textlike_file(path):
+                continue
+            text = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeError):
+            continue
+        profiles[owner]["sources"] |= bool(re.search(r"(?i)os\.environ|process\.env|printenv|\.ssh|credentials|secret|token", text))
+        text_has_sink = bool(re.search(r"(?i)\b(?:curl|wget|requests\.(?:post|put)|fetch\(|eval\(|exec\(|subprocess\.|(?:ba|z|fi)?sh\s+-c)", text))
+        profiles[owner]["sinks"] |= text_has_sink
+        profiles[owner]["decoders"] |= bool(re.search(r"(?i)base64\s+(?:-d|--decode)|xxd\s+-r|b64decode|fromhex", text))
+        if text_has_sink:
+            profiles[owner]["domains"].update(
+                match.group(1).casefold().rstrip(".")
+                for match in re.finditer(r"(?i)https?://([A-Za-z0-9.-]+)", text)
+            )
+        mentioned_names = set(re.findall(r"[a-z0-9][a-z0-9-]{1,63}", text.casefold()))
+        for mentioned_name in mentioned_names & known_skill_names:
+            profiles[owner]["mentions"].update(
+                other for other in skill_name_map[mentioned_name] if other != owner
+            )
+
+    findings: list[dict[str, Any]] = []
+    for source_root, source_profile in profiles.items():
+        for sink_root in sorted(source_profile["mentions"]):
+            sink_profile = profiles[sink_root]
+            if source_profile["sources"] and sink_profile["sinks"]:
+                findings.append(
+                    finding(
+                        "high",
+                        f"{source_root}, {sink_root}",
+                        "One skill gathers sensitive data and delegates to another skill with an outbound or execution sink.",
+                        "Review the collection as one trust boundary and remove the cross-skill secret flow.",
+                        "cross-skill-secret-flow",
+                        metadata={"source_skill": source_root, "sink_skill": sink_root},
+                    )
+                )
+            if source_profile["decoders"] and sink_profile["sinks"]:
+                findings.append(
+                    finding(
+                        "high",
+                        f"{source_root}, {sink_root}",
+                        "Decoder and execution stages are split across cooperating skills.",
+                        "Keep the complete behavior in one auditable skill or remove the staged execution chain.",
+                        "cross-skill-payload-splitting",
+                        metadata={"decoder_skill": source_root, "sink_skill": sink_root},
+                    )
+                )
+    domain_skills: dict[str, list[str]] = {}
+    for skill_root, profile in profiles.items():
+        for domain in profile["domains"]:
+            if domain in CROSS_SKILL_COMMON_DOMAINS or domain_is_trusted(domain, policy):
+                continue
+            domain_skills.setdefault(domain, []).append(skill_root)
+    for domain, participants in sorted(domain_skills.items()):
+        participants = sorted(set(participants))
+        if len(participants) < 2:
+            continue
+        if not any(
+            profiles[root]["sources"] or profiles[root]["decoders"]
+            for root in participants
+        ):
+            continue
+        findings.append(
+            finding(
+                "high",
+                ", ".join(participants),
+                "Multiple skills with sensitive-source or decoding behavior share an untrusted outbound domain.",
+                "Review the skills as one trust boundary and explicitly trust or remove the shared destination.",
+                "cross-skill-shared-domain",
+                metadata={"domain": domain, "skills": participants},
+            )
+        )
+    serializable_profiles = {
+        root: {
+            key: sorted(value) if isinstance(value, set) else value
+            for key, value in profile.items()
+        }
+        for root, profile in profiles.items()
+    }
+    return {
+        "enabled": True,
+        "skill_count": len(skill_roots),
+        "skills": skill_roots,
+        "profiles": serializable_profiles,
+    }, deduplicate_findings(findings)
+
+
+def run_registered_text_analyzers(
+    text: str,
+    rel: str,
+    lower_name: str,
+    suffix: str,
+    policy: ScanPolicy,
+    external_rules: Iterable[dict[str, Any]],
+    analyzer_state: dict[str, Any] | None = None,
+) -> list[dict[str, Any]]:
+    ensure_analyzer_registry()
+    findings: list[dict[str, Any]] = []
+    for name, definition in ANALYZER_REGISTRY.items():
+        if name in policy.disabled_analyzers:
+            if analyzer_state is not None:
+                analyzer_state.setdefault("skipped", set()).add(name)
+            continue
+        try:
+            analyzer_findings = definition.scanner(
+                text, rel, lower_name, suffix, policy, external_rules
+            )
+            findings.extend(analyzer_findings)
+            if analyzer_state is not None:
+                analyzer_state.setdefault("used", set()).add(name)
+        except Exception as exc:  # An analyzer failure must fail closed, not abort the inventory.
+            failure = {
+                "name": name,
+                "error": type(exc).__name__,
+            }
+            if analyzer_state is not None:
+                analyzer_state.setdefault("failed", []).append(failure)
+            findings.append(
+                finding(
+                    "high",
+                    rel,
+                    f"Static analyzer {name} failed while inspecting this file.",
+                    "Treat incomplete deterministic analysis as unsafe and report the analyzer failure.",
+                    "analyzer-failure",
+                    analyzer="orchestrator",
+                    metadata=failure,
+                )
+            )
+    return findings
+
+
 def scan_file_for_security_indicators(
-    path: Path, scan_root: Path, size: int
+    path: Path,
+    scan_root: Path,
+    size: int,
+    policy: ScanPolicy | None = None,
+    external_rules: Iterable[dict[str, Any]] = (),
+    analyzer_state: dict[str, Any] | None = None,
 ) -> list[dict[str, str]]:
+    policy = policy or load_scan_policy("balanced")
     rel = relative_string(path, scan_root)
     findings: list[dict[str, str]] = []
     lower_name = path.name.lower()
@@ -2649,7 +3742,37 @@ def scan_file_for_security_indicators(
         )
 
     if suffix in ARCHIVE_SUFFIXES | DOCUMENT_ARCHIVE_SUFFIXES:
-        findings.extend(scan_zip_like_archive(path, scan_root))
+        findings.extend(
+            scan_zip_like_archive(
+                path,
+                scan_root,
+                policy=policy,
+                external_rules=external_rules,
+            )
+        )
+
+    try:
+        with path.open("rb") as handle:
+            header = handle.read(512)
+    except OSError as exc:
+        findings.append(
+            finding("medium", rel, f"Could not read file header: {exc}", "Inspect manually.")
+        )
+        return findings
+    findings.extend(scan_file_magic(header, rel, suffix))
+    header_kind = detected_file_type(header)
+    if (
+        header_kind in {"zip", "gzip", "tar"}
+        and suffix not in ARCHIVE_SUFFIXES | DOCUMENT_ARCHIVE_SUFFIXES
+    ):
+        findings.extend(
+            scan_zip_like_archive(
+                path,
+                scan_root,
+                policy=policy,
+                external_rules=external_rules,
+            )
+        )
 
     if size > MAX_TEXT_SCAN_BYTES and is_textlike_file(path):
         findings.append(
@@ -2711,7 +3834,17 @@ def scan_file_for_security_indicators(
         return findings
 
     text = raw.decode("utf-8")
-    findings.extend(scan_text_patterns(text, rel, lower_name, suffix))
+    findings.extend(
+        run_registered_text_analyzers(
+            text,
+            rel,
+            lower_name,
+            suffix,
+            policy,
+            external_rules,
+            analyzer_state,
+        )
+    )
     return findings
 
 
@@ -2857,6 +3990,825 @@ def scan_text_patterns(
     return findings
 
 
+def safe_path_display(path: str) -> str:
+    if any(unicodedata.category(char) in {"Cc", "Cf"} for char in path):
+        return path.encode("unicode_escape").decode("ascii")
+    return path
+
+
+def unicode_tag_block_evidence(text: str) -> list[dict[str, Any]]:
+    evidence: list[dict[str, Any]] = []
+    for match in re.finditer("[\U000e0000-\U000e007f]+", text):
+        decoded = "".join(
+            chr(ord(char) - 0xE0000)
+            for char in match.group(0)
+            if 0xE0020 <= ord(char) <= 0xE007E
+        )
+        evidence.append(
+            {
+                "start": match.start(),
+                "count": len(match.group(0)),
+                "codepoints": sorted({f"U+{ord(char):06X}" for char in match.group(0)}),
+                "preview": decoded[:80].encode("unicode_escape").decode("ascii"),
+            }
+        )
+    return evidence
+
+
+def scan_path_for_unicode(path: str) -> list[dict[str, Any]]:
+    tag_evidence = unicode_tag_block_evidence(path)
+    if tag_evidence:
+        return [
+            finding(
+                "critical",
+                safe_path_display(path),
+                "Unicode Tag Block payload found in path.",
+                "Rename the path using visible source characters only.",
+                "unicode-tag-block-smuggling",
+                metadata=tag_evidence[0],
+            )
+        ]
+    controls = [
+        f"U+{ord(char):04X}"
+        for char in path
+        if char in UNICODE_BIDI_CONTROLS
+        or char in UNICODE_ZERO_WIDTH
+        or (unicodedata.category(char) == "Cc" and char not in {"\t"})
+    ]
+    if not controls:
+        return []
+    return [
+        finding(
+            "high",
+            safe_path_display(path),
+            "Deceptive Unicode control character found in path.",
+            "Rename the path using visible, normalized characters only.",
+            "deceptive-path",
+            metadata={"codepoints": sorted(set(controls))},
+        )
+    ]
+
+
+def build_unicode_collision_findings(
+    normalized_paths: dict[str, list[str]]
+) -> list[dict[str, Any]]:
+    findings: list[dict[str, Any]] = []
+    for paths in normalized_paths.values():
+        unique = sorted(set(paths))
+        if len(unique) < 2:
+            continue
+        findings.append(
+            finding(
+                "high",
+                ", ".join(safe_path_display(path) for path in unique),
+                "Paths collide after Unicode normalization and case folding.",
+                "Rename confusable paths so every normalized path is unique.",
+                "unicode-normalization-collision",
+                metadata={"path_count": len(unique)},
+            )
+        )
+    return findings
+
+
+def unicode_script(char: str) -> str | None:
+    name = unicodedata.name(char, "")
+    for script in ("LATIN", "CYRILLIC", "GREEK"):
+        if script in name:
+            return script
+    return None
+
+
+def scan_unicode_content(
+    text: str, rel: str, zero_width_min: int = 2
+) -> list[dict[str, Any]]:
+    findings: list[dict[str, Any]] = []
+    for evidence in unicode_tag_block_evidence(text):
+        findings.append(
+            finding(
+                "critical",
+                rel,
+                "Unicode Tag Block payload can conceal ASCII-like instructions.",
+                "Remove the hidden Tag Block sequence and keep instructions visibly auditable.",
+                "unicode-tag-block-smuggling",
+                line=text.count("\n", 0, int(evidence["start"])) + 1,
+                metadata={key: value for key, value in evidence.items() if key != "start"},
+            )
+        )
+    for line_number, line_text in enumerate(text.splitlines(), 1):
+        bidi = [f"U+{ord(char):04X}" for char in line_text if char in UNICODE_BIDI_CONTROLS]
+        if bidi:
+            findings.append(
+                finding(
+                    "high",
+                    rel,
+                    "Bidirectional Unicode control found in source text.",
+                    "Remove the control character or document a narrowly reviewed need for it.",
+                    "unicode-bidi-control",
+                    line=line_number,
+                    metadata={"codepoints": sorted(set(bidi)), "count": len(bidi)},
+                )
+            )
+        suspicious_zero_width = re.findall(
+            f"[\\u200b\\u200c\\u200d\\u2060\\ufeff]{{{zero_width_min},}}|"
+            "(?<=[A-Za-z0-9])[\u200b\u2060](?=[A-Za-z0-9])",
+            line_text,
+        )
+        if suspicious_zero_width:
+            sequence = "".join(suspicious_zero_width)
+            findings.append(
+                finding(
+                    "high",
+                    rel,
+                    "Suspicious zero-width sequence found in source text.",
+                    "Remove invisible separators from identifiers and executable instructions.",
+                    "unicode-zero-width-sequence",
+                    line=line_number,
+                    metadata={
+                        "codepoints": sorted({f"U+{ord(char):04X}" for char in sequence}),
+                        "count": len(sequence),
+                    },
+                )
+            )
+    for match in re.finditer(r"[^\W\d_]{4,}", text, re.UNICODE):
+        scripts = {unicode_script(char) for char in match.group(0)} - {None}
+        if len(scripts) > 1:
+            findings.append(
+                finding(
+                    "medium",
+                    rel,
+                    "Mixed-script identifier may be visually confusable.",
+                    "Use identifiers from one writing system or document the intentional spelling.",
+                    "unicode-mixed-script",
+                    line=text.count("\n", 0, match.start()) + 1,
+                    snippet=match.group(0),
+                    metadata={"scripts": sorted(scripts)},
+                )
+            )
+    return findings
+
+
+def logical_shell_text(text: str) -> str:
+    text = re.sub(r"\\\r?\n\s*", " ", text)
+    output: list[str] = []
+    quote: str | None = None
+    escaped = False
+    for char in text:
+        if escaped:
+            output.append(char)
+            escaped = False
+            continue
+        if char == "\\" and quote != "'":
+            output.append(char)
+            escaped = True
+            continue
+        if char in {"'", '"'}:
+            quote = None if quote == char else char if quote is None else quote
+        output.append(";" if char == "\n" and quote is None else char)
+    return "".join(output)
+
+
+def scan_shell_pipeline_taint(
+    text: str, rel: str, suffix: str
+) -> list[dict[str, Any]]:
+    if suffix not in EXECUTABLE_TEXT_SUFFIXES | {".md", ".mdx", ".txt", ""}:
+        return []
+    shell_text = logical_shell_text(text)
+    source = r"(?:curl\b|wget\b|fetch\b|nc\b|netcat\b|base64\s+(?:--decode|-d)\b|xxd\s+-r\b|openssl\s+enc\b[^;|]*\s-d\b)"
+    transforms = r"(?:[^|;]{0,300}\|){1,6}"
+    sink = r"(?:ba|z|fi)?sh\b|eval\b|python(?:3)?\s+-c\b|node\s+-e\b"
+    findings: list[dict[str, Any]] = []
+    direct = re.search(rf"(?is)\b{source}[^;]{{0,500}}\|{transforms}\s*(?:{sink})", shell_text)
+    if direct is None:
+        direct = re.search(rf"(?is)\b{source}[^;]{{0,500}}\|\s*(?:{sink})", shell_text)
+    if direct is not None and not re.search(
+        r"(?i)\b(?:do not|never|block|deny|forbid)\b", direct.group(0)
+    ):
+        severity = (
+            "medium"
+            if is_test_fixture_path(rel) or is_quoted_command_example(shell_text, direct)
+            else "high"
+        )
+        findings.append(
+            finding(
+                severity,
+                rel,
+                "Remote or decoded data flows through a shell pipeline into an execution sink.",
+                "Download, verify, and inspect content before executing it; pin its digest.",
+                "shell-tainted-pipeline",
+                line=text.count("\n", 0, min(direct.start(), len(text))) + 1,
+                snippet=re.sub(r"\s+", " ", direct.group(0))[:200],
+                metadata={"source": "network-or-decoder", "sink": "shell"},
+            )
+        )
+
+    sensitive_source = (
+        r"(?:cat\s+(?:~/(?:\.ssh|\.aws|\.config)|/etc/(?:shadow|passwd)|[^|;]*(?:credentials|id_rsa|id_ed25519))[^|;]*"
+        r"|printenv\b[^|;]*|env\b[^|;]*)"
+    )
+    exfil_sink = r"(?:curl\b[^;|]*(?:--data(?:-binary)?|-d|-F|--form|--upload-file|-T)\b|nc\b|netcat\b|wget\b[^;|]*--post-(?:data|file)\b)"
+    exfiltration = re.search(
+        rf"(?is){sensitive_source}\s*(?:\|\s*[^|;]+){{0,5}}\|\s*{exfil_sink}",
+        shell_text,
+    )
+    if exfiltration and not re.search(
+        r"(?i)\b(?:do not|never|block|deny|forbid)\b", exfiltration.group(0)
+    ):
+        findings.append(
+            finding(
+                "high",
+                rel,
+                "Sensitive local data flows through a shell pipeline to an outbound network sink.",
+                "Remove the data transfer and narrowly scope any approved credential access.",
+                "shell-tainted-pipeline",
+                line=text.count("\n", 0, min(exfiltration.start(), len(text))) + 1,
+                snippet=re.sub(r"\s+", " ", exfiltration.group(0))[:200],
+                metadata={
+                    "source": "sensitive-file-or-environment",
+                    "sink": "outbound-network",
+                    "flow": "sensitive-data-exfiltration",
+                },
+            )
+        )
+
+    tainted_vars: set[str] = set()
+    downloaded_files: set[str] = set()
+    for command in re.split(r"[;\n]", shell_text):
+        assignment = re.search(
+            rf"\b([A-Za-z_][A-Za-z0-9_]*)\s*=\s*\$\([^)]*\b{source}[^)]*\)",
+            command,
+            re.IGNORECASE,
+        )
+        if assignment:
+            tainted_vars.add(assignment.group(1))
+        download = re.search(
+            r"(?i)\b(?:curl\b[^;]*(?:-o|--output)|wget\b[^;]*(?:-O|--output-document))\s+([^\s;]+)",
+            command,
+        )
+        if download:
+            downloaded_files.add(download.group(1).strip("'\""))
+        redirection = re.search(r"(?i)\b(?:curl|wget)\b[^;>]*>\s*([^\s;]+)", command)
+        if redirection:
+            downloaded_files.add(redirection.group(1).strip("'\""))
+
+    for variable in sorted(tainted_vars):
+        match = re.search(
+            rf"(?is)(?:echo|printf)?[^;]{{0,120}}\$\{{?{re.escape(variable)}\}}?[^;]{{0,120}}(?:\|\s*(?:{sink})|\b(?:eval|exec)\b)",
+            shell_text,
+        )
+        if match:
+            findings.append(
+                finding(
+                    "high",
+                    rel,
+                    "Data fetched into a shell variable later reaches an execution sink.",
+                    "Validate and authenticate downloaded data before any evaluation.",
+                    "shell-tainted-pipeline",
+                    snippet=re.sub(r"\s+", " ", match.group(0))[:200],
+                    metadata={"variable": variable, "flow": "assignment-to-sink"},
+                )
+            )
+    for downloaded in sorted(downloaded_files):
+        if re.search(
+            rf"(?is)(?:^|[;&])\s*(?:{sink})\s+[^;]*{re.escape(downloaded)}(?:\s|;|$)",
+            shell_text,
+        ):
+            findings.append(
+                finding(
+                    "high",
+                    rel,
+                    "Downloaded artifact is executed later in a compound command.",
+                    "Verify the artifact digest and keep download and execution as separate reviewed steps.",
+                    "shell-tainted-pipeline",
+                    metadata={"artifact": Path(downloaded).name, "flow": "download-to-file-to-sink"},
+                )
+            )
+        if Path(downloaded).suffix.lower() in ARCHIVE_SUFFIXES and re.search(
+            rf"(?is)\b(?:tar|unzip|7z)\b[^;]*{re.escape(downloaded)}[^;]*;[^;]{{0,300}}(?:chmod\s+\+x|(?:ba|z|fi)?sh\b|\./)",
+            shell_text,
+        ):
+            findings.append(
+                finding(
+                    "high",
+                    rel,
+                    "Downloaded archive is extracted and its contents are executed in a compound command.",
+                    "Verify a pinned digest and inspect extracted files before any execution.",
+                    "shell-tainted-pipeline",
+                    metadata={"artifact": Path(downloaded).name, "flow": "fetch-extract-execute"},
+                )
+            )
+    return deduplicate_findings(findings)
+
+
+def dependency_record_finding(
+    rel: str, name: str, spec: str, mutable: bool, line: int | None = None
+) -> dict[str, Any]:
+    rule = "mutable-dependency-source" if mutable else "unpinned-dependency"
+    severity = "high" if mutable else "medium"
+    return finding(
+        severity,
+        rel,
+        "Dependency uses a mutable source or revision." if mutable else "Dependency is not pinned to an exact version.",
+        "Pin dependencies to an immutable version and digest or full commit SHA.",
+        rule,
+        line=line,
+        metadata={"dependency": name[:120], "specifier": spec[:160]},
+    )
+
+
+def apply_dependency_lockfile_context(
+    findings: list[dict[str, Any]], files: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    file_paths = {
+        str(item.get("path") or "").replace("\\", "/").casefold()
+        for item in files
+        if item.get("kind") == "file"
+    }
+    filtered: list[dict[str, Any]] = []
+    for item in findings:
+        if item.get("rule") != "unpinned-dependency":
+            filtered.append(item)
+            continue
+        manifest_path = str(item.get("path") or "").replace("\\", "/")
+        if "!/" in manifest_path:
+            filtered.append(item)
+            continue
+        manifest = Path(manifest_path)
+        lock_names = DEPENDENCY_LOCKFILES.get(manifest.name.casefold(), set())
+        directory = manifest.parent.as_posix().casefold()
+        has_lock = any(
+            (f"{directory}/{lock_name}" if directory != "." else lock_name) in file_paths
+            for lock_name in lock_names
+        )
+        if not has_lock:
+            filtered.append(item)
+    return filtered
+
+
+def dependency_is_exact(spec: str) -> bool:
+    value = spec.strip().strip("'\"")
+    value = value.split(";", 1)[0].strip()
+    value = re.sub(r"(?:\s+--hash=sha256:[0-9a-fA-F]{64})+$", "", value).strip()
+    return bool(
+        re.fullmatch(r"==\s*[0-9][A-Za-z0-9._+-]*", value)
+        or re.fullmatch(r"[0-9]+(?:\.[0-9A-Za-z_-]+)+", value)
+        or re.search(r"@[0-9a-fA-F]{40}(?:#|$)", value)
+    )
+
+
+def dependency_is_mutable(spec: str) -> bool:
+    lowered = spec.lower()
+    if lowered.strip("'\" ") == "latest" or lowered.startswith("workspace:"):
+        return True
+    if re.search(r"(?:@|/|#)(?:head|master|main)(?:$|[#?])", lowered):
+        return True
+    if any(token in lowered for token in ("git+", "github.com", "gitlab.com")):
+        return re.search(r"@[0-9a-f]{40}(?:#|$)", lowered) is None
+    if lowered.startswith(("http://", "https://")):
+        return "#sha256=" not in lowered
+    return False
+
+
+def scan_dependency_manifest(
+    text: str, rel: str, lower_name: str
+) -> list[dict[str, Any]]:
+    if lower_name not in DEPENDENCY_MANIFEST_NAMES:
+        return []
+    records: list[tuple[str, str]] = []
+    parse_error: str | None = None
+    if lower_name == "package.json":
+        try:
+            package = json.loads(text)
+        except json.JSONDecodeError as exc:
+            package = {}
+            parse_error = f"JSON parse error at line {exc.lineno}"
+        if isinstance(package, dict):
+            for section in ("dependencies", "devDependencies", "optionalDependencies", "peerDependencies"):
+                values = package.get(section, {})
+                if isinstance(values, dict):
+                    records.extend((str(name), str(spec)) for name, spec in values.items())
+    elif lower_name in {"requirements.txt", "pipfile"}:
+        for line in text.splitlines():
+            value = line.strip()
+            if not value or value.startswith(("#", "[")) or value.startswith(("--index-url", "--extra-index-url")):
+                continue
+            if lower_name == "pipfile" and "=" in value:
+                name, spec = value.split("=", 1)
+                records.append((name.strip(), spec.strip()))
+            else:
+                match = re.match(r"(?:-e\s+)?([A-Za-z0-9_.-]+)?\s*(.*)", value)
+                if match:
+                    records.append((match.group(1) or "direct-reference", match.group(2) or "*"))
+    elif lower_name == "setup.cfg":
+        in_requirements = False
+        for line in text.splitlines():
+            stripped = line.strip()
+            if re.match(r"install_requires\s*=", stripped, re.IGNORECASE):
+                in_requirements = True
+                remainder = stripped.split("=", 1)[1].strip()
+                if remainder:
+                    records.append((re.split(r"[<>=!~@ ]", remainder, 1)[0], remainder))
+                continue
+            if in_requirements and line[:1].isspace() and stripped:
+                records.append((re.split(r"[<>=!~@ ]", stripped, 1)[0], stripped))
+            elif stripped and not line[:1].isspace():
+                in_requirements = False
+    elif lower_name == "setup.py":
+        try:
+            tree = ast.parse(text)
+        except SyntaxError as exc:
+            tree = None
+            parse_error = f"Python syntax error at line {exc.lineno or 1}"
+        if tree:
+            for node in ast.walk(tree):
+                if isinstance(node, ast.keyword) and node.arg in {"install_requires", "setup_requires", "tests_require"}:
+                    if isinstance(node.value, (ast.List, ast.Tuple)):
+                        for entry in node.value.elts:
+                            if isinstance(entry, ast.Constant) and isinstance(entry.value, str):
+                                spec = entry.value
+                                records.append((re.split(r"[<>=!~@ ]", spec, 1)[0], spec))
+    else:  # pyproject.toml, parsed conservatively without adding a TOML dependency.
+        section = ""
+        collecting = False
+        for line in text.splitlines():
+            stripped = line.strip()
+            section_match = re.fullmatch(r"\[([^]]+)]", stripped)
+            if section_match:
+                section = section_match.group(1).casefold()
+                collecting = False
+                continue
+            starts_array = bool(
+                re.match(r"(?:dependencies|requires)\s*=\s*\[", stripped)
+                or (
+                    section in {"project.optional-dependencies", "dependency-groups"}
+                    and re.match(r"[A-Za-z0-9_.-]+\s*=\s*\[", stripped)
+                )
+            )
+            if starts_array:
+                collecting = True
+            if collecting:
+                for match in re.finditer(r"['\"]([^'\"]+)['\"]", stripped):
+                    spec = match.group(1).strip()
+                    records.append((re.split(r"[<>=!~@ \[]", spec, 1)[0], spec))
+                if "]" in stripped:
+                    collecting = False
+                continue
+            if section in {"tool.poetry.dependencies", "tool.poetry.dev-dependencies"}:
+                match = re.match(
+                    r"([A-Za-z0-9_.-]+)\s*=\s*(?:['\"]([^'\"]+)['\"]|(.+))",
+                    stripped,
+                )
+                if match and match.group(1).casefold() != "python":
+                    records.append((match.group(1), (match.group(2) or match.group(3)).strip()))
+
+    findings: list[dict[str, Any]] = []
+    if parse_error:
+        findings.append(
+            finding(
+                "high",
+                rel,
+                f"Dependency manifest could not be parsed safely: {parse_error}.",
+                "Fix the manifest syntax so dependency analysis can complete.",
+                "dependency-manifest-invalid",
+            )
+        )
+    for name, spec in records:
+        evidence = spec.strip().strip("'\"")
+        position = text.find(evidence)
+        line = text.count("\n", 0, position) + 1 if position >= 0 else None
+        if dependency_is_mutable(spec):
+            findings.append(dependency_record_finding(rel, name, spec, True, line))
+        elif not dependency_is_exact(spec):
+            findings.append(dependency_record_finding(rel, name, spec, False, line))
+    return deduplicate_findings(findings)
+
+
+def redact_secret(value: str) -> str:
+    if len(value) <= 8:
+        return "[redacted]"
+    return f"{value[:4]}…{value[-4:]}"
+
+
+def is_placeholder_secret_value(value: str) -> bool:
+    lowered = value.casefold()
+    if any(
+        marker in lowered
+        for marker in ("example", "placeholder", "redacted", "changeme", "your-token", "test-token")
+    ):
+        return True
+    alphanumeric = re.sub(r"[^A-Za-z0-9]", "", value)
+    return bool(alphanumeric) and len(set(alphanumeric.casefold())) <= 3
+
+
+def scan_provider_secrets_and_exfiltration(
+    text: str, rel: str, suffix: str, policy: ScanPolicy
+) -> list[dict[str, Any]]:
+    findings: list[dict[str, Any]] = []
+    for provider, pattern in SECRET_PATTERNS:
+        for match in pattern.finditer(text):
+            value = match.group(0)
+            if is_placeholder_secret_value(value):
+                continue
+            findings.append(
+                finding(
+                    "critical",
+                    rel,
+                    f"{provider} credential pattern found.",
+                    "Revoke the credential, remove it from history, and use a secret manager.",
+                    "provider-secret",
+                    line=text.count("\n", 0, match.start()) + 1,
+                    metadata={
+                        "provider": provider,
+                        "redacted": redact_secret(value),
+                        "fingerprint": hashlib.sha256(value.encode()).hexdigest()[:12],
+                    },
+                )
+            )
+
+    pii_terms = r"(?:email|e-mail|phone|address|contact|ssn|social.security|customer[_ -]?data)"
+    harvest = re.search(
+        rf"(?is)(?:glob|rglob|walk|find|recursive|all\s+files).{{0,220}}{pii_terms}|{pii_terms}.{{0,220}}(?:upload|post|send|collect|harvest|export)",
+        text,
+    )
+    if harvest:
+        findings.append(
+            finding(
+                "medium",
+                rel,
+                "Broad collection of personally identifying data may be requested or implemented.",
+                "Limit collection to named fields and files, require consent, and avoid outbound transfer.",
+                "pii-harvesting",
+                line=text.count("\n", 0, harvest.start()) + 1,
+                snippet=re.sub(r"\s+", " ", harvest.group(0))[:180],
+            )
+        )
+
+    dynamic_remote = re.compile(
+        r"(?is)(?:!\[[^]]*\]\(|<img\b[^>]*src\s*=\s*['\"]?)https?://([^/'\"\s)>]+)[^\n)>]{0,500}(?:\$\{|\{\{|%7B|document\.|process\.env|os\.environ|token|secret|clipboard)"
+    )
+    for match in dynamic_remote.finditer(text):
+        domain = match.group(1).lower().rstrip(".")
+        if domain in policy.trusted_domains:
+            continue
+        findings.append(
+            finding(
+                "high",
+                rel,
+                "Dynamic Markdown or HTML resource can exfiltrate local data through its URL.",
+                "Remove dynamic values from remote resource URLs and allowlist reviewed destinations.",
+                "markdown-exfiltration",
+                line=text.count("\n", 0, match.start()) + 1,
+                metadata={"domain": domain},
+            )
+        )
+    data_uri = re.search(r"(?i)(?:!\[[^]]*\]\(|<img\b[^>]*src\s*=)[^\n>]*data:[^\s)>]+", text)
+    executable_data_uri = re.search(
+        r"(?is)data:(?:text/html|(?:text|application)/javascript|image/svg\+xml)[^,]{0,100},[^\s)]{8,}",
+        text,
+    )
+    if executable_data_uri:
+        findings.append(
+            finding(
+                "high",
+                rel,
+                "Executable data URI can conceal active HTML, JavaScript, or SVG content.",
+                "Remove executable data URIs and keep active content source-readable.",
+                "markdown-exfiltration",
+                line=text.count("\n", 0, executable_data_uri.start()) + 1,
+                metadata={"media_type": executable_data_uri.group(0).split(",", 1)[0][:80]},
+            )
+        )
+    elif data_uri and len(data_uri.group(0)) > 512:
+        findings.append(
+            finding(
+                "medium",
+                rel,
+                "Large embedded data URI can conceal content from ordinary review.",
+                "Replace opaque data URIs with source-readable, reviewed assets.",
+                "markdown-exfiltration",
+                line=text.count("\n", 0, data_uri.start()) + 1,
+            )
+        )
+    if policy.name == "strict":
+        raw_pii_patterns = (
+            ("US Social Security number", re.compile(r"(?<!\d)\d{3}-\d{2}-\d{4}(?!\d)")),
+            ("payment card-like number", re.compile(r"(?<!\d)(?:\d[ -]?){15,19}(?!\d)")),
+        )
+        for pii_kind, pii_pattern in raw_pii_patterns:
+            for match in pii_pattern.finditer(text):
+                value = match.group(0)
+                findings.append(
+                    finding(
+                        "high",
+                        rel,
+                        f"Raw {pii_kind} found under the strict policy.",
+                        "Remove or replace the value with an obviously synthetic placeholder.",
+                        "raw-pii-value",
+                        line=text.count("\n", 0, match.start()) + 1,
+                        metadata={
+                            "kind": pii_kind,
+                            "redacted": redact_secret(value),
+                            "fingerprint": hashlib.sha256(value.encode()).hexdigest()[:12],
+                        },
+                    )
+                )
+    return findings
+
+
+def scan_external_signatures(
+    text: str,
+    rel: str,
+    suffix: str,
+    rules: Iterable[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    findings: list[dict[str, Any]] = []
+    for rule in rules:
+        suffixes = rule.get("suffixes", ())
+        if suffixes and suffix not in suffixes:
+            continue
+        include_paths = rule.get("paths", ())
+        exclude_paths = rule.get("exclude_paths", ())
+        if include_paths and not path_matches_exclusion(rel, include_paths):
+            continue
+        if exclude_paths and path_matches_exclusion(rel, exclude_paths):
+            continue
+        pattern = rule.get("pattern")
+        if not isinstance(pattern, re.Pattern):
+            continue
+        match = pattern.search(text[:MAX_EXTERNAL_RULE_TEXT])
+        if not match:
+            continue
+        findings.append(
+            finding(
+                str(rule["severity"]),
+                rel,
+                str(rule["issue"]),
+                str(rule["recommendation"]),
+                str(rule["rule"]),
+                category=str(rule.get("category") or "custom"),
+                analyzer="external",
+                line=text.count("\n", 0, match.start()) + 1,
+                snippet=re.sub(r"\s+", " ", match.group(0))[:160],
+                metadata={"pack": str(rule.get("pack") or "external")},
+            )
+        )
+    return findings
+
+
+def ast_qualified_name(node: ast.AST) -> str:
+    if isinstance(node, ast.Name):
+        return node.id
+    if isinstance(node, ast.Attribute):
+        parent = ast_qualified_name(node.value)
+        return f"{parent}.{node.attr}" if parent else node.attr
+    return ""
+
+
+def ast_referenced_names(node: ast.AST) -> set[str]:
+    return {child.id for child in ast.walk(node) if isinstance(child, ast.Name)}
+
+
+def python_expr_is_source(node: ast.AST) -> bool:
+    for child in ast.walk(node):
+        if isinstance(child, ast.Call):
+            name = ast_qualified_name(child.func)
+            if name in {
+                "input",
+                "open",
+                "os.getenv",
+                "Path.read_text",
+                "Path.read_bytes",
+                "requests.get",
+                "urllib.request.urlopen",
+            } or name.endswith((".read", ".read_text", ".read_bytes")):
+                return True
+        if isinstance(child, ast.Subscript) and ast_qualified_name(child.value) in {
+            "os.environ",
+            "environ",
+        }:
+            return True
+    return False
+
+
+def scan_python_behavioral_flows(text: str, rel: str) -> list[dict[str, Any]]:
+    try:
+        tree = ast.parse(text, filename=rel)
+    except (SyntaxError, ValueError) as exc:
+        return [
+            finding(
+                "medium",
+                rel,
+                "Focused Python behavioral analysis could not parse this source.",
+                "Fix the syntax or review source-to-sink behavior manually.",
+                "behavioral-analysis-incomplete",
+                line=getattr(exc, "lineno", None),
+                metadata={"coverage": "incomplete", "error": type(exc).__name__},
+            )
+        ]
+    assignments: dict[str, ast.AST] = {}
+    tainted: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.Assign, ast.AnnAssign)):
+            value = node.value
+            targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+            for target in targets:
+                if isinstance(target, ast.Name) and value is not None:
+                    assignments[target.id] = value
+                    if python_expr_is_source(value):
+                        tainted.add(target.id)
+    changed = True
+    while changed:
+        changed = False
+        for name, expression in assignments.items():
+            if name not in tainted and ast_referenced_names(expression) & tainted:
+                tainted.add(name)
+                changed = True
+
+    execution_sinks = {
+        "eval",
+        "exec",
+        "os.system",
+        "subprocess.run",
+        "subprocess.call",
+        "subprocess.Popen",
+        "subprocess.check_call",
+        "subprocess.check_output",
+    }
+    network_sinks = {
+        "requests.post",
+        "requests.put",
+        "urllib.request.urlopen",
+        "httpx.post",
+        "socket.send",
+        "socket.sendall",
+    }
+    findings: list[dict[str, Any]] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        sink = ast_qualified_name(node.func)
+        if sink not in execution_sinks | network_sinks:
+            continue
+        arguments = list(node.args) + [keyword.value for keyword in node.keywords]
+        source_direct = any(python_expr_is_source(argument) for argument in arguments)
+        variables = set().union(*(ast_referenced_names(argument) for argument in arguments)) if arguments else set()
+        flowing = sorted(variables & tainted)
+        if not source_direct and not flowing:
+            continue
+        sink_kind = "execution" if sink in execution_sinks else "network"
+        findings.append(
+            finding(
+                "high",
+                rel,
+                f"Python data from an external or sensitive source reaches a {sink_kind} sink.",
+                "Validate and constrain source data before passing it to execution or outbound network APIs.",
+                "focused-python-taint",
+                line=getattr(node, "lineno", None),
+                metadata={"sink": sink, "tainted_variables": flowing[:20]},
+            )
+        )
+    return findings
+
+
+def scan_shell_behavioral_flows(text: str, rel: str) -> list[dict[str, Any]]:
+    shell_text = logical_shell_text(text)
+    tainted: set[str] = set()
+    for match in re.finditer(
+        r"(?i)\b([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(?:\$\([^)]*(?:printenv|cat\s+~?/|curl|wget)[^)]*\)|\$\{?(?:TOKEN|SECRET|PASSWORD|API_KEY|HOME)[A-Za-z0-9_]*\}?)",
+        shell_text,
+    ):
+        tainted.add(match.group(1))
+    findings: list[dict[str, Any]] = []
+    for variable in sorted(tainted):
+        variable_ref = rf"\$\{{?{re.escape(variable)}\}}?"
+        sink_match = re.search(
+            rf"(?is)(?:eval\s+[^;]*{variable_ref}|(?:ba|z|fi)?sh\s+-c\s+[^;]*{variable_ref}|(?:curl|wget|nc)\b[^;]*{variable_ref})",
+            shell_text,
+        )
+        if sink_match:
+            findings.append(
+                finding(
+                    "high",
+                    rel,
+                    "Shell data from an external or sensitive source reaches an execution or network sink.",
+                    "Quote, validate, and constrain the value; do not evaluate or transmit secrets.",
+                    "focused-shell-taint",
+                    snippet=re.sub(r"\s+", " ", sink_match.group(0))[:180],
+                    metadata={"variable": variable},
+                )
+            )
+    return findings
+
+
+def scan_behavioral_flows(
+    text: str, rel: str, suffix: str
+) -> list[dict[str, Any]]:
+    if suffix == ".py":
+        return scan_python_behavioral_flows(text, rel)
+    if suffix in {".sh", ".bash", ".zsh", ".fish"}:
+        return scan_shell_behavioral_flows(text, rel)
+    return []
+
+
 def contains_private_key_material(text: str) -> bool:
     pattern = re.compile(
         r"-----BEGIN (?P<kind>(?:RSA |DSA |EC |OPENSSH )?)PRIVATE KEY-----"
@@ -2997,16 +4949,24 @@ def executable_code_text(text: str, suffix: str) -> str:
         return code
 
 
-def scan_zip_like_archive(path: Path, scan_root: Path) -> list[dict[str, str]]:
+def scan_zip_like_archive(
+    path: Path,
+    scan_root: Path,
+    policy: ScanPolicy | None = None,
+    external_rules: Iterable[dict[str, Any]] = (),
+) -> list[dict[str, Any]]:
     rel = relative_string(path, scan_root)
-    findings: list[dict[str, str]] = []
-    if not zipfile.is_zipfile(path):
-        return findings
-
+    budget = ArchiveBudget()
+    policy = policy or load_scan_policy("balanced")
+    rule_list = list(external_rules)
     try:
-        with zipfile.ZipFile(path) as archive:
-            members = archive.infolist()
-    except (OSError, zipfile.BadZipFile) as exc:
+        if zipfile.is_zipfile(path):
+            with zipfile.ZipFile(path) as archive:
+                return scan_zip_archive_handle(archive, rel, 0, budget, policy, rule_list)
+        if tarfile.is_tarfile(path):
+            with tarfile.open(path, mode="r:*") as archive:
+                return scan_tar_archive_handle(archive, rel, 0, budget, policy, rule_list)
+    except (OSError, EOFError, zipfile.BadZipFile, tarfile.TarError) as exc:
         return [
             finding(
                 "high",
@@ -3015,79 +4975,471 @@ def scan_zip_like_archive(path: Path, scan_root: Path) -> list[dict[str, str]]:
                 "Treat unreadable archives as unsafe.",
             )
         ]
+    return [
+        finding(
+            "high",
+            rel,
+            "Archive format is unsupported or malformed for recursive content inspection.",
+            "Remove the archive or unpack it into source-readable files before scanning.",
+            analyzer="archive",
+            metadata={"coverage": "incomplete", "format": path.suffix.lower() or None},
+        )
+    ]
 
-    if len(members) > MAX_ZIP_MEMBERS:
+
+def archive_member_baseline_findings(
+    name: str,
+    size: int,
+    compressed_size: int | None,
+    virtual_path: str,
+) -> list[dict[str, Any]]:
+    findings: list[dict[str, Any]] = []
+    normalized = name.replace("\\", "/")
+    suffix = Path(normalized).suffix.lower()
+    parts = [part for part in normalized.split("/") if part]
+    if normalized.startswith("/") or any(part == ".." for part in parts):
+        findings.append(
+            finding(
+                "critical",
+                virtual_path,
+                "Archive member uses an absolute path or path traversal.",
+                "Reject archives with unsafe extraction paths.",
+            )
+        )
+    if size > MAX_ARCHIVE_MEMBER_BYTES:
         findings.append(
             finding(
                 "high",
-                rel,
-                f"Archive has more than {MAX_ZIP_MEMBERS} members.",
+                virtual_path,
+                f"Archive member uncompressed size ({size // (1024 * 1024)} MB) exceeds limit.",
+                "Reject archive members that would exhaust disk or memory on extraction.",
+            )
+        )
+    if compressed_size and size / compressed_size > MAX_COMPRESSION_RATIO:
+        findings.append(
+            finding(
+                "high",
+                virtual_path,
+                f"Archive member has extreme compression ratio ({size // max(compressed_size, 1)}:1).",
+                "Reject probable archive-bomb entries that expand to exhaust resources.",
+            )
+        )
+    if suffix in BLOCKED_BYTECODE_SUFFIXES | BLOCKED_NATIVE_SUFFIXES:
+        findings.append(
+            finding(
+                "critical",
+                virtual_path,
+                "Archive embeds bytecode or native payload.",
+                "Remove compiled payloads from skill packages.",
+            )
+        )
+    if suffix in EXECUTABLE_TEXT_SUFFIXES:
+        findings.append(
+            finding(
+                "high",
+                virtual_path,
+                "Archive embeds executable script content.",
+                "Do not hide executable instructions inside document or archive files.",
+            )
+        )
+    if Path(normalized).name in SENSITIVE_DOTFILES:
+        findings.append(
+            finding(
+                "high",
+                virtual_path,
+                "Archive embeds sensitive configuration file.",
+                "Remove hidden credential or package-manager configuration from archives.",
+            )
+        )
+    findings.extend(scan_path_for_unicode(virtual_path))
+    return findings
+
+
+def scan_archive_member_payload(
+    raw: bytes,
+    name: str,
+    virtual_path: str,
+    depth: int,
+    budget: ArchiveBudget,
+    policy: ScanPolicy,
+    external_rules: Iterable[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    findings = scan_file_magic(raw, virtual_path, Path(name).suffix.lower())
+    suffix = Path(name).suffix.lower()
+    nested = suffix in ARCHIVE_SUFFIXES | DOCUMENT_ARCHIVE_SUFFIXES or detected_file_type(raw) in {"zip", "gzip", "tar"}
+    if nested:
+        archive_depth_limit = policy.thresholds.get("archive_depth", MAX_ARCHIVE_DEPTH)
+        if depth >= archive_depth_limit:
+            findings.append(
+                finding(
+                    "high",
+                    virtual_path,
+                    f"Nested archive exceeds recursion depth limit of {archive_depth_limit}.",
+                    "Flatten nested archives and expose source-readable contents.",
+                )
+            )
+        else:
+            findings.extend(
+                scan_archive_bytes(
+                    raw,
+                    virtual_path,
+                    depth + 1,
+                    budget,
+                    policy,
+                    external_rules,
+                )
+            )
+    if len(raw) <= MAX_TEXT_SCAN_BYTES and not is_binary_content(raw):
+        text = raw.decode("utf-8")
+        lower_name = Path(name).name.lower()
+        findings.extend(
+            run_registered_text_analyzers(
+                text,
+                virtual_path,
+                lower_name,
+                suffix,
+                policy,
+                external_rules,
+            )
+        )
+    return findings
+
+
+def scan_archive_bytes(
+    raw: bytes,
+    virtual_path: str,
+    depth: int,
+    budget: ArchiveBudget,
+    policy: ScanPolicy,
+    external_rules: Iterable[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    try:
+        stream = io.BytesIO(raw)
+        if zipfile.is_zipfile(stream):
+            stream.seek(0)
+            with zipfile.ZipFile(stream) as archive:
+                return scan_zip_archive_handle(
+                    archive, virtual_path, depth, budget, policy, external_rules
+                )
+        stream.seek(0)
+        with tarfile.open(fileobj=stream, mode="r:*") as archive:
+            return scan_tar_archive_handle(
+                archive, virtual_path, depth, budget, policy, external_rules
+            )
+    except (OSError, EOFError, zipfile.BadZipFile, tarfile.TarError):
+        return [
+            finding(
+                "high",
+                virtual_path,
+                "Nested archive could not be decoded safely.",
+                "Remove malformed or unsupported nested archives.",
+            )
+        ]
+
+
+def archive_budget_allows(
+    size: int, virtual_path: str, budget: ArchiveBudget
+) -> tuple[bool, list[dict[str, Any]]]:
+    budget.members += 1
+    if budget.members > MAX_ZIP_MEMBERS:
+        return False, [
+            finding(
+                "high",
+                virtual_path,
+                f"Archive tree has more than {MAX_ZIP_MEMBERS} members.",
+                "Reject oversized archives that can exhaust scanner review.",
+            )
+        ]
+    if budget.expanded_bytes + size > MAX_ARCHIVE_EXPANDED_BYTES:
+        return False, [
+            finding(
+                "high",
+                virtual_path,
+                f"Archive tree exceeds expanded-byte limit of {MAX_ARCHIVE_EXPANDED_BYTES // (1024 * 1024)} MB.",
+                "Reduce archive contents and keep packages source-readable.",
+            )
+        ]
+    budget.expanded_bytes += size
+    return True, []
+
+
+def scan_zip_archive_handle(
+    archive: zipfile.ZipFile,
+    virtual_root: str,
+    depth: int,
+    budget: ArchiveBudget,
+    policy: ScanPolicy,
+    external_rules: Iterable[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    findings: list[dict[str, Any]] = []
+    members = archive.infolist()
+    if len(members) + budget.members > MAX_ZIP_MEMBERS:
+        findings.append(
+            finding(
+                "high",
+                virtual_root,
+                f"Archive tree has more than {MAX_ZIP_MEMBERS} members.",
                 "Reject oversized archives that can exhaust scanner review.",
             )
         )
-
-    for member in members[:MAX_ZIP_MEMBERS]:
-        member_name = member.filename
-        normalized = member_name.replace("\\", "/")
-        member_suffix = Path(normalized).suffix.lower()
-        member_path = f"{rel}!/{normalized}"
-        parts = [part for part in normalized.split("/") if part]
-
-        if normalized.startswith("/") or any(part == ".." for part in parts):
+    for member in members[: max(0, MAX_ZIP_MEMBERS - budget.members)]:
+        normalized = member.filename.replace("\\", "/")
+        virtual_path = f"{virtual_root}!/{normalized}"
+        if member.is_dir():
+            continue
+        findings.extend(
+            archive_member_baseline_findings(
+                normalized, member.file_size, member.compress_size, virtual_path
+            )
+        )
+        unix_mode = (member.external_attr >> 16) & 0o170000
+        if unix_mode == 0o120000:
             findings.append(
                 finding(
                     "critical",
-                    member_path,
-                    "Archive member uses an absolute path or path traversal.",
-                    "Reject archives with unsafe extraction paths.",
+                    virtual_path,
+                    "Archive member is a symbolic link.",
+                    "Remove archive symlinks; never extract them into a skill directory.",
+                    "archive-member-symlink",
                 )
             )
-        if member.file_size > MAX_ARCHIVE_MEMBER_BYTES:
+            continue
+        allowed, budget_findings = archive_budget_allows(member.file_size, virtual_path, budget)
+        findings.extend(budget_findings)
+        if not allowed or member.file_size > MAX_ARCHIVE_MEMBER_BYTES:
+            continue
+        try:
+            raw = archive.read(member)
+        except (OSError, RuntimeError, zipfile.BadZipFile) as exc:
             findings.append(
                 finding(
                     "high",
-                    member_path,
-                    f"Archive member uncompressed size ({member.file_size // (1024 * 1024)} MB) exceeds limit.",
-                    "Reject archive members that would exhaust disk or memory on extraction.",
+                    virtual_path,
+                    f"Archive member could not be read: {exc}",
+                    "Treat partially inspected archives as unsafe.",
                 )
             )
-        if member.compress_size > 0 and member.file_size / member.compress_size > MAX_COMPRESSION_RATIO:
-            findings.append(
-                finding(
-                    "high",
-                    member_path,
-                    f"Archive member has extreme compression ratio ({member.file_size // max(member.compress_size, 1)}:1).",
-                    "Reject probable zip-bomb entries that expand to exhaust resources.",
-                )
+            continue
+        findings.extend(
+            scan_archive_member_payload(
+                raw,
+                normalized,
+                virtual_path,
+                depth,
+                budget,
+                policy,
+                external_rules,
             )
-        if member_suffix in BLOCKED_BYTECODE_SUFFIXES | BLOCKED_NATIVE_SUFFIXES:
-            findings.append(
-                finding(
-                    "critical",
-                    member_path,
-                    "Archive embeds bytecode or native payload.",
-                    "Remove compiled payloads from skill packages.",
-                )
-            )
-        if member_suffix in EXECUTABLE_TEXT_SUFFIXES:
-            findings.append(
-                finding(
-                    "high",
-                    member_path,
-                    "Archive embeds executable script content.",
-                    "Do not hide executable instructions inside document or archive files.",
-                )
-            )
-        if Path(normalized).name in SENSITIVE_DOTFILES:
-            findings.append(
-                finding(
-                    "high",
-                    member_path,
-                    "Archive embeds sensitive configuration file.",
-                    "Remove hidden credential or package-manager configuration from archives.",
-                )
-            )
+        )
     return findings
+
+
+def scan_tar_archive_handle(
+    archive: tarfile.TarFile,
+    virtual_root: str,
+    depth: int,
+    budget: ArchiveBudget,
+    policy: ScanPolicy,
+    external_rules: Iterable[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    findings: list[dict[str, Any]] = []
+    members = archive.getmembers()
+    for member in members[: max(0, MAX_ZIP_MEMBERS - budget.members)]:
+        normalized = member.name.replace("\\", "/")
+        virtual_path = f"{virtual_root}!/{normalized}"
+        if member.isdir():
+            continue
+        findings.extend(
+            archive_member_baseline_findings(normalized, member.size, None, virtual_path)
+        )
+        if member.issym() or member.islnk():
+            findings.append(
+                finding(
+                    "critical",
+                    virtual_path,
+                    "Archive member is a symbolic or hard link.",
+                    "Remove archive links; never extract them into a skill directory.",
+                    "archive-member-symlink",
+                    metadata={"target": safe_path_display(member.linkname)[:200]},
+                )
+            )
+            continue
+        allowed, budget_findings = archive_budget_allows(member.size, virtual_path, budget)
+        findings.extend(budget_findings)
+        if not allowed or member.size > MAX_ARCHIVE_MEMBER_BYTES or not member.isfile():
+            continue
+        try:
+            extracted = archive.extractfile(member)
+            raw = extracted.read() if extracted else b""
+        except (OSError, tarfile.TarError) as exc:
+            findings.append(
+                finding(
+                    "high",
+                    virtual_path,
+                    f"Archive member could not be read: {exc}",
+                    "Treat partially inspected archives as unsafe.",
+                )
+            )
+            continue
+        findings.extend(
+            scan_archive_member_payload(
+                raw,
+                normalized,
+                virtual_path,
+                depth,
+                budget,
+                policy,
+                external_rules,
+            )
+        )
+    return findings
+
+
+def detected_file_type(raw: bytes) -> str | None:
+    signatures: tuple[tuple[bytes, str], ...] = (
+        (b"\x7fELF", "elf"),
+        (b"MZ", "pe"),
+        (b"\xca\xfe\xba\xbe", "java-class-or-mach-o"),
+        (b"\xfe\xed\xfa\xce", "mach-o"),
+        (b"\xfe\xed\xfa\xcf", "mach-o"),
+        (b"\xcf\xfa\xed\xfe", "mach-o"),
+        (b"\xce\xfa\xed\xfe", "mach-o"),
+        (b"PK\x03\x04", "zip"),
+        (b"PK\x05\x06", "zip"),
+        (b"PK\x07\x08", "zip"),
+        (b"\x1f\x8b", "gzip"),
+        (b"\xfd7zXZ\x00", "xz"),
+        (b"BZh", "bzip2"),
+        (b"7z\xbc\xaf'\x1c", "7z"),
+        (b"Rar!\x1a\x07", "rar"),
+        (b"%PDF-", "pdf"),
+        (b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1", "ole-compound"),
+        (b"\x89PNG\r\n\x1a\n", "png"),
+        (b"\xff\xd8\xff", "jpeg"),
+        (b"GIF87a", "gif"),
+        (b"GIF89a", "gif"),
+        (b"\x00asm", "wasm"),
+        (b"wOFF", "woff"),
+        (b"wOF2", "woff2"),
+        (b"OTTO", "otf"),
+        (b"\x00\x01\x00\x00", "ttf"),
+        (b"BM", "bmp"),
+        (b"II*\x00", "tiff"),
+        (b"MM\x00*", "tiff"),
+        (b"\x00\x00\x01\x00", "ico"),
+    )
+    for signature, kind in signatures:
+        if raw.startswith(signature):
+            return kind
+    if len(raw) >= 12 and raw.startswith(b"RIFF") and raw[8:12] == b"WEBP":
+        return "webp"
+    if raw.startswith(b"#!"):
+        return "source-script"
+    if (
+        len(raw) >= 16
+        and raw[2:4] == b"\r\n"
+        and int.from_bytes(raw[4:8], "little") in {0, 1, 2, 3}
+    ):
+        return "python-bytecode"
+    if len(raw) >= 262 and raw[257:262] == b"ustar":
+        return "tar"
+    return None
+
+
+def scan_file_magic(raw: bytes, rel: str, suffix: str) -> list[dict[str, Any]]:
+    kind = detected_file_type(raw)
+    if kind is None:
+        signature_required = {
+            ".zip",
+            ".gz",
+            ".tgz",
+            ".xz",
+            ".bz2",
+            ".7z",
+            ".rar",
+            ".pdf",
+            ".png",
+            ".jpg",
+            ".jpeg",
+            ".gif",
+            ".woff",
+            ".woff2",
+            ".ttf",
+            ".otf",
+            ".so",
+            ".dylib",
+            ".dll",
+            ".pyd",
+            ".class",
+            ".jar",
+        } | DOCUMENT_ARCHIVE_SUFFIXES
+        if suffix in signature_required and raw:
+            return [
+                finding(
+                    "high",
+                    rel,
+                    f"File extension {suffix} does not match a recognized file signature.",
+                    "Verify the file type and remove disguised or malformed binary content.",
+                    "file-type-mismatch",
+                    metadata={"detected_type": None, "extension": suffix},
+                )
+            ]
+        return []
+    expected: dict[str, set[str]] = {
+        "zip": {".zip", ".docx", ".xlsx", ".pptx", ".odt", ".ods", ".odp", ".jar"},
+        "gzip": {".gz", ".tgz"},
+        "xz": {".xz"},
+        "bzip2": {".bz2"},
+        "7z": {".7z"},
+        "rar": {".rar"},
+        "tar": {".tar"},
+        "pdf": {".pdf"},
+        "ole-compound": {".doc", ".xls", ".ppt", ".msi"},
+        "png": {".png"},
+        "jpeg": {".jpg", ".jpeg"},
+        "gif": {".gif"},
+        "webp": {".webp"},
+        "bmp": {".bmp"},
+        "tiff": {".tif", ".tiff"},
+        "ico": {".ico"},
+        "elf": {".so"},
+        "pe": {".exe", ".dll", ".pyd"},
+        "mach-o": {".dylib"},
+        "java-class-or-mach-o": {".class", ".dylib"},
+        "wasm": {".wasm"},
+        "python-bytecode": {".pyc", ".pyo"},
+        "woff": {".woff"},
+        "woff2": {".woff2"},
+        "ttf": {".ttf"},
+        "otf": {".otf"},
+        "source-script": EXECUTABLE_TEXT_SUFFIXES | {"", ".txt"},
+    }
+    allowed = expected.get(kind, set())
+    if suffix in allowed:
+        return []
+    severity = "critical" if kind in {
+        "elf",
+        "pe",
+        "mach-o",
+        "java-class-or-mach-o",
+        "wasm",
+        "python-bytecode",
+    } else "high"
+    return [
+        finding(
+            severity,
+            rel,
+            f"File content is {kind} but its extension is {suffix or '[none]' }.",
+            "Rename the file accurately and remove compiled or opaque payloads from skills.",
+            "file-type-mismatch",
+            metadata={
+                "detected_type": kind,
+                "extension": suffix or None,
+                "confidence": "high",
+                "classification_source": "magic-bytes",
+            },
+        )
+    ]
 
 
 def is_textlike_file(path: Path) -> bool:
@@ -3278,14 +5630,36 @@ def finding(
     issue: str,
     recommendation: str,
     rule: str | None = None,
-) -> dict[str, str]:
-    return {
-        "rule": rule or finding_rule_id(issue),
+    *,
+    category: str | None = None,
+    analyzer: str | None = None,
+    line: int | None = None,
+    snippet: str | None = None,
+    metadata: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    rule_id = rule or finding_rule_id(issue)
+    definition = RULE_REGISTRY.get(rule_id)
+    location = f"{path}:{line or 0}:{snippet or issue}"
+    finding_id = hashlib.sha256(
+        f"{rule_id}\0{location}".encode("utf-8", errors="replace")
+    ).hexdigest()[:20]
+    result: dict[str, Any] = {
+        "id": finding_id,
+        "rule": rule_id,
         "severity": severity,
+        "category": category or (definition.category if definition else "general"),
+        "analyzer": analyzer or (definition.analyzer if definition else "static"),
         "path": path,
         "issue": issue,
         "recommendation": recommendation,
     }
+    if line is not None:
+        result["line"] = line
+    if snippet:
+        result["snippet"] = snippet[:240]
+    if metadata:
+        result["metadata"] = metadata
+    return result
 
 
 def finding_rule_id(issue: str) -> str:
@@ -3578,6 +5952,9 @@ def normalize_security_result(
         "reviewed_at": datetime.now(timezone.utc).isoformat(),
         "file_count": inventory.get("file_count", 0),
         "exclusions": security_exclusion_summary(inventory, excluded_findings),
+        "policy": inventory.get("policy", {}),
+        "analyzers": inventory.get("analyzers", {}),
+        "collection": inventory.get("collection", {}),
     }
 
     if has_blocking_findings(findings):
@@ -3592,8 +5969,8 @@ def normalize_security_result(
 
 
 def apply_security_exclusions(
-    findings: list[dict[str, str]], inventory: dict[str, Any]
-) -> list[dict[str, str]]:
+    findings: list[dict[str, Any]], inventory: dict[str, Any]
+) -> list[dict[str, Any]]:
     excluded_rules = {
         str(rule) for rule in inventory.get("exclude_rules", []) if str(rule)
     }
@@ -3603,7 +5980,7 @@ def apply_security_exclusions(
     scan_root = Path(str(inventory.get("root") or "."))
     exclusion_root = Path(str(inventory.get("exclusion_root") or scan_root))
 
-    included: list[dict[str, str]] = []
+    included: list[dict[str, Any]] = []
     for item in findings:
         if item["rule"] in excluded_rules:
             continue
@@ -3614,6 +5991,25 @@ def apply_security_exclusions(
             continue
         included.append(item)
     return included
+
+
+def apply_policy_to_findings(
+    findings: list[dict[str, Any]], policy: ScanPolicy
+) -> list[dict[str, Any]]:
+    configured: list[dict[str, Any]] = []
+    for item in findings:
+        rule_id = str(item.get("rule") or finding_rule_id(str(item.get("issue") or "")))
+        severity = str(item.get("severity") or "medium")
+        if rule_id in policy.disabled_rules and severity not in {"high", "critical"}:
+            continue
+        override = policy.severity_overrides.get(rule_id)
+        if override:
+            if severity in {"high", "critical"} and risk_rank(override) < risk_rank(severity):
+                override = severity
+            item = dict(item)
+            item["severity"] = override
+        configured.append(item)
+    return configured
 
 
 def security_exclusion_summary(
@@ -3628,11 +6024,11 @@ def security_exclusion_summary(
     }
 
 
-def normalize_findings(value: Any) -> list[dict[str, str]]:
+def normalize_findings(value: Any) -> list[dict[str, Any]]:
     if not isinstance(value, list):
         return []
 
-    normalized: list[dict[str, str]] = []
+    normalized: list[dict[str, Any]] = []
     for item in value:
         if not isinstance(item, dict):
             continue
@@ -3643,21 +6039,30 @@ def normalize_findings(value: Any) -> list[dict[str, str]]:
         rule = str(item.get("rule") or "").strip().lower().replace("_", "-")
         if re.fullmatch(r"[a-z0-9][a-z0-9-]*", rule) is None:
             rule = finding_rule_id(issue)
-        normalized.append(
-            finding(
-                severity,
-                str(item.get("path") or "."),
-                issue,
-                str(item.get("recommendation") or "Inspect manually."),
-                rule,
-            )
+        line_value = item.get("line")
+        line = line_value if isinstance(line_value, int) and line_value > 0 else None
+        metadata = item.get("metadata")
+        normalized_item = finding(
+            severity,
+            str(item.get("path") or "."),
+            issue,
+            str(item.get("recommendation") or "Inspect manually."),
+            rule,
+            category=str(item.get("category") or "") or None,
+            analyzer=str(item.get("analyzer") or "") or None,
+            line=line,
+            snippet=str(item.get("snippet") or "") or None,
+            metadata=metadata if isinstance(metadata, dict) else None,
         )
+        if isinstance(item.get("id"), str) and item["id"]:
+            normalized_item["id"] = item["id"]
+        normalized.append(normalized_item)
     return normalized
 
 
-def deduplicate_findings(findings: list[dict[str, str]]) -> list[dict[str, str]]:
+def deduplicate_findings(findings: list[dict[str, Any]]) -> list[dict[str, Any]]:
     seen: set[tuple[str, str, str]] = set()
-    unique: list[dict[str, str]] = []
+    unique: list[dict[str, Any]] = []
     for item in findings:
         key = (item["severity"], item["path"], item["rule"])
         if key in seen:
@@ -3793,7 +6198,7 @@ def print_security_result(
         findings, key=lambda finding_item: -risk_rank(finding_item["severity"])
     ):
         tag = paint(f"[{item['severity'].upper()}]", severity_color(item["severity"]))
-        print(f"- {tag} {item['path']}: {item['issue']} [{item['rule']}]")
+        print(f"- {tag} {safe_path_display(item['path'])}: {item['issue']} [{item['rule']}]")
         if item["recommendation"]:
             print(paint(f"  Recommendation: {item['recommendation']}", "dim"))
 
@@ -3822,7 +6227,7 @@ def print_ci_security_result(
         )
     for item in sorted(findings, key=lambda f: -risk_rank(f["severity"])):
         print(
-            f"skills-manager: [{item['severity'].upper()}] {item['path']}: "
+            f"skills-manager: [{item['severity'].upper()}] {safe_path_display(item['path'])}: "
             f"{item['issue']} [{item['rule']}]",
             file=sys.stderr,
         )
@@ -3886,6 +6291,123 @@ def format_elapsed(seconds: float) -> str:
         return f"{seconds:.1f}s"
     minutes, remainder = divmod(seconds, 60)
     return f"{int(minutes)}m {remainder:.0f}s"
+
+
+def sarif_level(severity: str) -> str:
+    return {
+        "critical": "error",
+        "high": "error",
+        "medium": "warning",
+        "low": "note",
+    }.get(severity, "warning")
+
+
+def sarif_artifact_uri(value: str) -> str:
+    normalized = value.replace("\\", "/")
+    virtual_parts = normalized.split("!/")
+    safe_parts: list[str] = []
+    for index, virtual_part in enumerate(virtual_parts):
+        path_parts: list[str] = []
+        for part in PurePosixPath(virtual_part).parts:
+            if part in {"", ".", "/"}:
+                continue
+            path_parts.append("__parent__" if part == ".." else part)
+        safe_value = "/".join(path_parts) or "."
+        if index:
+            safe_value = safe_value.lstrip("/")
+        safe_parts.append(safe_value)
+    return quote("!/".join(safe_parts), safe="/!._-~")
+
+
+def build_sarif_report(result: dict[str, Any]) -> dict[str, Any]:
+    findings = normalize_findings(result.get("findings", []))
+    rule_ids = sorted({str(item["rule"]) for item in findings})
+    rules: list[dict[str, Any]] = []
+    for rule_id in rule_ids:
+        definition = RULE_REGISTRY.get(rule_id)
+        matching = next(item for item in findings if item["rule"] == rule_id)
+        rules.append(
+            {
+                "id": rule_id,
+                "name": (definition.title if definition else rule_id.replace("-", " ").title()),
+                "shortDescription": {"text": str(matching.get("issue") or rule_id)},
+                "fullDescription": {"text": str(matching.get("recommendation") or "Inspect manually.")},
+                "properties": {
+                    "category": str(matching.get("category") or "general"),
+                    "defaultSeverity": (
+                        definition.default_severity
+                        if definition
+                        else str(matching.get("severity") or "medium")
+                    ),
+                    "analyzer": str(matching.get("analyzer") or "static"),
+                },
+            }
+        )
+
+    sarif_results: list[dict[str, Any]] = []
+    for item in findings:
+        location: dict[str, Any] = {
+            "physicalLocation": {
+                "artifactLocation": {"uri": sarif_artifact_uri(str(item.get("path") or "."))}
+            }
+        }
+        if isinstance(item.get("line"), int):
+            location["physicalLocation"]["region"] = {"startLine": item["line"]}
+        if item.get("snippet"):
+            region = location["physicalLocation"].setdefault("region", {})
+            region["snippet"] = {"text": str(item["snippet"])[:240]}
+        sarif_item: dict[str, Any] = {
+            "ruleId": item["rule"],
+            "level": sarif_level(str(item.get("severity") or "medium")),
+            "message": {
+                "text": f"{item.get('issue')} Remediation: {item.get('recommendation')}"
+            },
+            "locations": [location],
+            "partialFingerprints": {
+                "skillsManagerFindingId": str(item.get("id") or "")
+            },
+            "properties": {
+                "severity": item.get("severity"),
+                "category": item.get("category"),
+                "analyzer": item.get("analyzer"),
+            },
+        }
+        if item.get("metadata"):
+            sarif_item["properties"]["metadata"] = item["metadata"]
+        sarif_results.append(sarif_item)
+
+    return {
+        "$schema": "https://json.schemastore.org/sarif-2.1.0.json",
+        "version": "2.1.0",
+        "runs": [
+            {
+                "tool": {
+                    "driver": {
+                        "name": "Skills Manager",
+                        "informationUri": "https://github.com/mazen160/skills-manager",
+                        "version": __version__,
+                        "rules": rules,
+                    }
+                },
+                "results": sarif_results,
+                "properties": {
+                    "resultSchemaVersion": result.get("schema_version"),
+                    "reviewType": result.get("review_type"),
+                    "safe": result.get("safe"),
+                    "riskLevel": result.get("risk_level"),
+                    "policy": result.get("policy", {}),
+                    "collection": result.get("collection", {}),
+                },
+            }
+        ],
+    }
+
+
+def write_optional_sarif(value: str | None, result: dict[str, Any]) -> None:
+    if not value:
+        return
+    path = resolve_output_path(value)
+    write_json(path, build_sarif_report(result))
 
 
 def resolve_security_result_path(value: str | None, fallback_dir: Path) -> tuple[Path, bool]:

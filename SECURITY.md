@@ -69,11 +69,15 @@ Skills Manager is a pre-installation security gate. It reduces risk; it does not
 
 ### Deterministic review is the primary gate
 
-The static scanner inventories the complete selected source tree and checks files, links, archives, executable surfaces, hidden configuration, persistence hooks, registry changes, native loading, environment access, and scanner-evasion patterns. It reads untrusted content but does not execute bundled skill code.
+The static scanner inventories the complete selected source tree and checks files, recursive references, bounded archive contents, executable surfaces, hidden configuration, persistence hooks, dependency pinning, registry changes, native loading, environment access, Unicode deception, manifest capability contracts, source-to-sink behavior, and scanner-evasion patterns. It reads untrusted content but does not execute bundled skill code or extract archives to disk.
 
 Install and update use `--minimum-accepted-severity medium` by default. Low and medium findings are accepted; high and critical findings block the operation. You can tighten or relax that ceiling explicitly. `--unsafe-install` bypasses the install gate and should be treated as accepting the full risk of the source.
 
 Scan and install support explicit exclusions after manual review. `--exclude RULE` suppresses one stable scanner rule while retaining the matching content. `--exclude-path GLOB` removes matching source-relative content from both the scan and installed copy. Exclusions are included in result JSON; install exclusions are also stored in tracking metadata and reapplied during updates. Treat either option as a scoped policy exception and review it whenever the source changes.
+
+Built-in `strict`, `balanced`, and `permissive` scanner profiles and versioned JSON policy files can raise or tune non-blocking findings. Policy files cannot disable a blocking deterministic rule or lower its severity. Versioned external signature packs are validated before scanning, reject duplicate IDs and unsafe nested-quantifier forms, and are reported with the active policy fingerprint. These controls do not make third-party regular expressions a substitute for source review.
+
+`--sarif PATH` exports the normalized result as SARIF 2.1.0. Treat SARIF and JSON artifacts as sensitive: paths, snippets, domains, and finding metadata may describe confidential source. Provider credentials are redacted and fingerprinted rather than copied into finding metadata.
 
 `--force-run-ai-checks` does not override a deterministic block. It only runs the optional AI review so you can collect a second opinion on an already-blocked source.
 

@@ -42,10 +42,12 @@ Skills Manager checks the selected GitHub repository or local folder before it c
 The scanner does not stop at `SKILL.md`. It walks the selected source tree and checks:
 
 - Private keys and credential-like values
-- Shell execution, subprocess use, destructive commands, and network scripts
-- Symlinks, hard links, path traversal, and unsafe archive contents
+- Provider credentials, PII harvesting, and dynamic Markdown/HTML exfiltration
+- Shell pipelines, focused source-to-sink behavior, destructive commands, and network scripts
+- Symlinks, hard links, escaping references, Unicode-deceptive paths, and unsafe archive contents
 - Git hooks, package lifecycle scripts, registry rewrites, and native loading
-- Hidden configuration, binaries, oversized files, and common scanner-evasion techniques
+- Unpinned or mutable dependencies and invalid `SKILL.md`/`allowed-tools` contracts
+- Magic-byte mismatches, recursively nested archives, hidden configuration, and scanner evasion
 
 The scanner reads untrusted source. It does not execute bundled skill code.
 
@@ -189,6 +191,67 @@ skills install ./skill \
 
 `--exclude RULE` removes that rule from the verdict but leaves the matching content in place. `--exclude-path GLOB` omits matching source-relative content from the scan and, during installation, from the installed copy. Install exclusions are recorded in `.skills-install.json` and preserved by future updates.
 
+### Select a scanner policy or add organization rules
+
+`scan`, `install`, and `update` use the `balanced` policy by default. The built-in `strict` profile raises selected review findings, while `permissive` lowers selected non-blocking findings. A JSON policy can extend any built-in profile:
+
+```bash
+skills scan ./skill --policy strict
+skills scan ./skill --policy ./security-policy.json
+```
+
+```json
+{
+  "version": 1,
+  "name": "company-policy",
+  "extends": "strict",
+  "severity_overrides": {"pii-harvesting": "high"},
+  "disabled_rules": ["dependency-manifest"],
+  "disabled_analyzers": ["external"],
+  "trusted_domains": ["assets.example.com"],
+  "thresholds": {"reference_depth": 8, "archive_depth": 2}
+}
+```
+
+Policy files cannot disable blocking deterministic rules or lower their severity. Explicit command-line exclusions remain separately visible in the result. Versioned external signature packs are repeatable with `--rules-file PATH`:
+
+```json
+{
+  "version": 1,
+  "id": "company-rules",
+  "rules": [{
+    "id": "forbidden-bootstrap-host",
+    "severity": "high",
+    "pattern": "bootstrap\\.internal\\.invalid",
+    "issue": "Unapproved bootstrap host found.",
+    "recommendation": "Use the reviewed bootstrap service.",
+    "suffixes": [".sh", ".md"]
+  }]
+}
+```
+
+Rule-pack IDs cannot collide with built-in or previously loaded rules. Patterns are length-bounded, compiled before scanning, and rejected when they contain common nested-quantifier hazards.
+
+### Export SARIF or correlate a skill collection
+
+```bash
+skills scan ./skill --sarif skills-manager.sarif
+skills scan ./skills-repository --cross-skill --output collection.json \
+  --sarif collection.sarif
+```
+
+SARIF 2.1.0 output includes rule metadata, source locations, severities, remediation text, and stable fingerprints for GitHub code scanning and other compatible consumers. `--cross-skill` looks for explicitly connected skills that split secret collection, decoding, outbound transfer, or execution across package boundaries; ordinary unrelated skills are not correlated.
+
+In GitHub Actions, generate the artifact even when the scan blocks, then upload it with `github/codeql-action/upload-sarif`:
+
+```yaml
+- run: skills scan . --ci --sarif skills-manager.sarif
+  continue-on-error: true
+- uses: github/codeql-action/upload-sarif@v3
+  with:
+    sarif_file: skills-manager.sarif
+```
+
 ### Check and apply updates
 
 ```bash
@@ -260,17 +323,22 @@ Run `skills COMMAND --help` for the flags accepted by that command.
 | Category | Examples |
 | --- | --- |
 | Secrets and keys | Private key blocks, key files, credential-like assignments |
-| Execution surfaces | Network scripts piped to shells, destructive commands, `eval`, `exec`, subprocess and shell APIs |
-| Non-text payloads | Binaries, bytecode, native libraries, archives, document containers, images |
-| Archive indirection | Path traversal, embedded scripts or compiled payloads, hidden configuration, excessive contents |
-| Filesystem tricks | Symlinks, escaping or absolute links, hard links, embedded `.git` metadata, hidden files |
+| Execution surfaces | Multi-stage shell pipelines, focused Python/shell data flow, destructive commands, `eval`, `exec`, subprocess APIs |
+| Supply chain | Unpinned dependencies, mutable Git/URL sources, lifecycle scripts, registry rewrites |
+| Non-text payloads | Magic-byte mismatches, binaries, bytecode, native libraries, document containers, images |
+| Archive indirection | Bounded recursive ZIP/TAR inspection, path traversal, links, scripts, compiled payloads, archive bombs |
+| Filesystem and references | Symlinks, escaping/recursive references, hard links, Unicode-deceptive paths, hidden files |
 | Persistence | Git hooks, `core.hooksPath`, Husky hooks, package lifecycle scripts |
 | Registry hijacks | npm/yarn registry rewrites, pip index and extra-index settings |
 | Native loading | `LD_PRELOAD`, `DYLD_INSERT_LIBRARIES`, `ctypes.CDLL`, `dlopen`, runtime compilation |
 | Scanner evasion | Long padding, pathological line or character counts, files too large to inspect completely |
-| Credential access | Executable code that reads process environment variables |
+| Secrets and exfiltration | Provider-specific credentials, environment access, PII harvesting, dynamic Markdown URLs |
+| Manifest contracts | Required metadata and observed behavior outside declared `allowed-tools` capabilities |
+| Collection behavior | Explicitly related skills that split sources, decoders, network transfer, and execution sinks |
 
 Static checks intentionally avoid simple phrase matching for prompt injection. Use AI checks when source intent requires semantic review.
+
+Dependency analysis recognizes `package-lock.json`, `npm-shrinkwrap.json`, `yarn.lock`, `pnpm-lock.yaml`, `Pipfile.lock`, `poetry.lock`, `uv.lock`, and `pdm.lock` in the manifest directory. A recognized lockfile suppresses range-only `unpinned-dependency` findings; mutable VCS branches, latest tags, and unhashed URLs remain findings. `setup.py` is parsed with `ast` and is never imported or executed. Unicode checks target Tag Block payloads, bidi controls, deceptive filenames, and suspicious zero-width sequences rather than treating ordinary international text or emoji variation selectors as unsafe.
 
 ### Severity policy
 
@@ -290,8 +358,13 @@ Related install controls:
 | `--unsafe-install` | Continue despite blocking findings. Use only after deliberate manual review. |
 | `--recursive` | Install every discovered directory containing `SKILL.md`. |
 | `--output PATH` | Write the normalized security report to a file. |
+| `--sarif PATH` | Also write SARIF 2.1.0 output. |
+| `--policy PROFILE_OR_PATH` | Use `strict`, `balanced`, `permissive`, or a JSON policy file. |
+| `--rules-file PATH` | Load a versioned external signature pack; repeatable. |
 | `--exclude RULE` | Exclude a displayed scanner rule ID; repeatable. |
 | `--exclude-path GLOB` | Exclude a source-relative path from scanning and installation; repeatable. |
+
+`scan --cross-skill` additionally enables collection correlation for nested skills.
 
 </details>
 

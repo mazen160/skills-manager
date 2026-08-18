@@ -6,6 +6,17 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+### Added
+
+- Add a fail-closed analyzer registry and normalized finding schema v2 with stable fingerprints, categories, analyzer provenance, locations, policy metadata, and analyzer health.
+- Add Unicode deception, multi-stage shell pipeline flow, dependency pinning, recursive reference containment, provider-secret, PII-harvesting, and Markdown exfiltration analyzers.
+- Add magic-byte validation, focused Python AST and shell source-to-sink analysis, `SKILL.md`/`allowed-tools` security contracts, cross-skill collection correlation, and bounded recursive ZIP/TAR member scanning.
+- Add SARIF 2.1.0 export with `--sarif`, built-in `strict`/`balanced`/`permissive` profiles, JSON policy files, and repeatable versioned external signature packs with `--rules-file`.
+
+### Security
+
+- Keep policy configuration fail-closed: blocking deterministic rules cannot be disabled or downgraded by a policy file, analyzer failures become blocking findings, and archive contents are inspected in memory under shared depth, member, ratio, and expanded-byte budgets.
+
 ## [1.0.2] - 2026-08-06
 
 ### Added
